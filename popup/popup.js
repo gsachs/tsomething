@@ -17,7 +17,6 @@ document.querySelector(".tabs").addEventListener("click", (e) => {
 const elLabel     = document.getElementById("session-label");
 const elCountdown = document.getElementById("countdown");
 const elFill      = document.getElementById("progress-fill");
-const elDots      = document.querySelectorAll(".dot");
 const elPause     = document.getElementById("pause-label");
 const elStart     = document.getElementById("btn-start");
 const elStop      = document.getElementById("btn-stop");
@@ -25,13 +24,18 @@ const elSkip      = document.getElementById("btn-skip");
 const elBind      = document.getElementById("btn-bind");
 const elBindStatus = document.getElementById("bind-status");
 
-function msToMinSec(ms, round) {
-  const s = round ? Math.round(ms / 1000) : Math.ceil(ms / 1000);
+function msToMinSecCeil(ms) {
+  const s = Math.ceil(ms / 1000);
+  return [Math.floor(s / 60), s % 60];
+}
+
+function msToMinSecRound(ms) {
+  const s = Math.round(ms / 1000);
   return [Math.floor(s / 60), s % 60];
 }
 
 function formatTime(ms) {
-  const [m, s] = msToMinSec(ms, false);
+  const [m, s] = msToMinSecCeil(ms);
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
@@ -41,6 +45,25 @@ const MODE_LABEL = {
   break:     "BREAK",
   longBreak: "LONG BREAK",
 };
+
+function updateButtonVisibility(mode) {
+  if (mode === "idle") {
+    elStart.classList.remove("hidden");
+    elStop.classList.add("hidden");
+    elSkip.classList.add("hidden");
+    elStart.textContent = "Start";
+    elStart.classList.remove("break-mode");
+  } else if (mode === "work") {
+    elStart.classList.add("hidden");
+    elStop.classList.remove("hidden");
+    elSkip.classList.add("hidden");
+  } else {
+    // break or longBreak
+    elStart.classList.add("hidden");
+    elStop.classList.add("hidden");
+    elSkip.classList.remove("hidden");
+  }
+}
 
 function renderTimerState(state) {
   const { mode, progress, remaining, autoPaused, pomodoroCount, boundTabId, settings } = state;
@@ -63,7 +86,17 @@ function renderTimerState(state) {
 
   // Filled dots = completed pomos in the current cycle
   const interval = settings?.longBreakInterval ?? 4;
-  elDots.forEach((dot, i) => {
+  const dotsContainer = document.querySelector(".dots");
+  if (dotsContainer.children.length !== interval) {
+    dotsContainer.replaceChildren(
+      ...Array.from({ length: interval }, () => {
+        const s = document.createElement("span");
+        s.className = "dot";
+        return s;
+      })
+    );
+  }
+  dotsContainer.querySelectorAll(".dot").forEach((dot, i) => {
     dot.classList.toggle("filled", i < pomodoroCount % interval);
   });
 
@@ -71,22 +104,7 @@ function renderTimerState(state) {
   elPause.classList.toggle("hidden", !autoPaused);
 
   // Buttons
-  if (mode === "idle") {
-    elStart.classList.remove("hidden");
-    elStop.classList.add("hidden");
-    elSkip.classList.add("hidden");
-    elStart.textContent = "Start";
-    elStart.classList.remove("break-mode");
-  } else if (mode === "work") {
-    elStart.classList.add("hidden");
-    elStop.classList.remove("hidden");
-    elSkip.classList.add("hidden");
-  } else {
-    // break or longBreak
-    elStart.classList.add("hidden");
-    elStop.classList.add("hidden");
-    elSkip.classList.remove("hidden");
-  }
+  updateButtonVisibility(mode);
 
   // Bind button
   const bound = boundTabId !== null;
@@ -121,7 +139,7 @@ elBind.addEventListener("click", () => {
 const elHistoryList = document.getElementById("history-list");
 
 function fmtDuration(ms) {
-  const [m, s] = msToMinSec(ms, true);
+  const [m, s] = msToMinSecRound(ms);
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
@@ -138,6 +156,16 @@ function dayKey(ts) {
   if (d.toDateString() === today.toDateString()) return "Today";
   if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
   return d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
+}
+
+function groupByDay(sessions) {
+  const map = {};
+  sessions.forEach((entry) => {
+    const key = dayKey(entry.startTime);
+    if (!map[key]) map[key] = [];
+    map[key].push(entry);
+  });
+  return Object.entries(map).map(([label, entries]) => ({ label, entries }));
 }
 
 function loadHistory() {
@@ -157,14 +185,7 @@ function loadHistory() {
       return;
     }
 
-    const groups = {};
-    workSessions.forEach((entry) => {
-      const key = dayKey(entry.startTime);
-      if (!groups[key]) groups[key] = [];
-      groups[key].push(entry);
-    });
-
-    Object.entries(groups).forEach(([label, entries]) => {
+    groupByDay(workSessions).forEach(({ label, entries }) => {
       const groupEl = document.createElement("div");
       groupEl.className = "history-group-label";
       groupEl.textContent = label;

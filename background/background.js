@@ -1,4 +1,10 @@
 // Pomo background script — timer state machine, persistence, messaging.
+//
+// ARCHITECTURE NOTE: This script requires "persistent": true in manifest.json.
+// The timer uses a live setInterval handle (tickInterval). If the background page
+// is suspended (persistent: false / MV3 service worker), the handle and all
+// in-memory state are destroyed mid-session. Do not remove persistent: true
+// without replacing setInterval with a browser.alarms-based approach.
 
 const DEFAULT_SETTINGS = {
   workDuration: 25,
@@ -128,8 +134,8 @@ function startSession(mode) {
 
 function stopSession() {
   if (state.mode === "idle") return;
-  // Change 4 (todo 010): consolidated into recordWorkSession.
-  recordWorkSession(false);
+  // Change 4 (todo 010): consolidated into finalizeWorkSession.
+  finalizeWorkSession(false);
   resetToIdle();
 }
 
@@ -137,8 +143,8 @@ function onSessionComplete() {
   stopTick();
 
   if (state.mode === "work") {
-    // Change 4 (todo 010): replace inline logSession + pomodoroCount++ with recordWorkSession.
-    recordWorkSession(true);
+    // Change 4 (todo 010): replace inline logSession + pomodoroCount++ with finalizeWorkSession.
+    finalizeWorkSession(true);
   }
 
   const wasWork = state.mode === "work";
@@ -231,9 +237,9 @@ browser.windows.onFocusChanged.addListener(scheduleActivityCheck);
 browser.tabs.onRemoved.addListener((tabId) => {
   if (tabId !== state.boundTabId) return;
 
-  // Change 4 (todo 010): bound tab closed — use recordWorkSession instead of
+  // Change 4 (todo 010): bound tab closed — use finalizeWorkSession instead of
   // inline logic; counts as abandoned if work session met threshold.
-  recordWorkSession(false);
+  finalizeWorkSession(false);
 
   state.boundTabId = null;
   resetToIdle();
@@ -241,14 +247,23 @@ browser.tabs.onRemoved.addListener((tabId) => {
 
 // ─── History ──────────────────────────────────────────────────────────────────
 
-// Change 4 (todo 010): maybeLogWork replaced by recordWorkSession, which also
+// Change 4 (todo 010): maybeLogWork replaced by finalizeWorkSession, which also
 // handles the pomodoroCount increment, eliminating duplicate increment paths.
-function recordWorkSession(fullyCompleted) {
+function finalizeWorkSession(fullyCompleted) {
   if (state.mode !== "work") return;
   const pct = fullyCompleted ? 100 : progress() * 100;
   const counted = fullyCompleted || pct >= settings.completionThreshold;
   if (counted) state.pomodoroCount++;
   logSession(counted, pct);
+}
+
+async function appendToHistory(entry) {
+  const stored = await browser.storage.local.get("history");
+  let history = stored.history || [];
+  history.push(entry);
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  history = history.filter((e) => e.startTime > cutoff);
+  await browser.storage.local.set({ history });
 }
 
 // Change 3 (todo 003): snapshot mutable state synchronously before the first
@@ -275,14 +290,7 @@ async function logSession(completed, pctComplete) {
     pctComplete: Math.round(pctComplete),
   };
 
-  const stored = await browser.storage.local.get("history");
-  let history = stored.history || [];
-  history.push(entry);
-
-  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-  history = history.filter((e) => e.startTime > cutoff);
-
-  await browser.storage.local.set({ history });
+  await appendToHistory(entry);
 }
 
 // ─── Notifications ────────────────────────────────────────────────────────────
@@ -344,7 +352,7 @@ function broadcastState() {
   if (state.boundTabId !== null) {
     browser.tabs.sendMessage(state.boundTabId, {
       type: "UPDATE_BAR",
-      ...ps,
+      state: ps,
       isBoundTab: true,
     }).catch(() => {});
   }
@@ -354,20 +362,33 @@ function broadcastState() {
 
 // ─── Persistence ──────────────────────────────────────────────────────────────
 
+function serializeState() {
+  return {
+    mode: state.mode,
+    boundTabId: state.boundTabId,
+    startTimestamp: state.startTimestamp,
+    elapsedMs: state.elapsedMs,
+    sessionDuration: state.sessionDuration,
+    autoPaused: state.autoPaused,
+    pomodoroCount: state.pomodoroCount,
+    sessionStart: state.sessionStart,
+    sessionDomain: state.sessionDomain,
+  };
+}
+
+function deserializeState(s) {
+  Object.assign(state, s);
+  if (!s.autoPaused && s.startTimestamp) {
+    const elapsed = Date.now() - s.startTimestamp;
+    if (elapsed >= s.sessionDuration) return "completed";
+    state.elapsedMs = elapsed;
+    state.startTimestamp = Date.now() - state.elapsedMs;
+  }
+  return "resumed";
+}
+
 async function persistState() {
-  await browser.storage.local.set({
-    timerState: {
-      mode: state.mode,
-      boundTabId: state.boundTabId,
-      startTimestamp: state.startTimestamp,
-      elapsedMs: state.elapsedMs,
-      sessionDuration: state.sessionDuration,
-      autoPaused: state.autoPaused,
-      pomodoroCount: state.pomodoroCount,
-      sessionStart: state.sessionStart,
-      sessionDomain: state.sessionDomain,
-    },
-  });
+  await browser.storage.local.set({ timerState: serializeState() });
 }
 
 async function init() {
@@ -379,23 +400,8 @@ async function init() {
   }
 
   if (stored.timerState && stored.timerState.mode !== "idle") {
-    const s = stored.timerState;
-    Object.assign(state, s);
-
-    // If timer was running when browser closed, compute elapsed since then
-    if (!s.autoPaused && s.startTimestamp) {
-      const elapsed = Date.now() - s.startTimestamp;
-      if (elapsed >= s.sessionDuration) {
-        // Session completed while browser was closed — treat as complete
-        state.elapsedMs = s.sessionDuration;
-        onSessionComplete();
-        return;
-      }
-      // Resume: update startTimestamp to now, accounting for accumulated elapsed
-      state.elapsedMs = elapsed;
-      state.startTimestamp = Date.now() - state.elapsedMs;
-    }
-
+    const result = deserializeState(stored.timerState);
+    if (result === "completed") { onSessionComplete(); return; }
     startTick();
     updateBadge();
   }

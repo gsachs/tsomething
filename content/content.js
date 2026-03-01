@@ -2,34 +2,24 @@
 
 let myTabId = null;
 let isBound = false;
-let originalFaviconHref = null;
-let faviconLinkEl = null;
 let lastMode = null;
-let _faviconGen = 0;
 let pendingMsg = null;
 
 // ─── Bar ─────────────────────────────────────────────────────────────────────
 
-function createBar() {
-  const root = document.createElement("div");
-  root.id = "pomo-bar-root";
-  root.setAttribute("data-mode", "idle");
+const bar = document.createElement("div");
+bar.id = "pomo-bar-root";
+bar.setAttribute("data-mode", "idle");
 
-  const fill = document.createElement("div");
-  fill.id = "pomo-bar-fill";
-  root.appendChild(fill);
-
-  document.body.prepend(root);
-  return root;
-}
-
-const bar = createBar();
+const barFill = document.createElement("div");
+barFill.id = "pomo-bar-fill";
+bar.appendChild(barFill);
+document.body.prepend(bar);
 
 function updateBar(state) {
   const mode = state.autoPaused ? "paused" : state.mode;
   bar.setAttribute("data-mode", mode);
-  bar.querySelector("#pomo-bar-fill").style.width =
-    state.mode === "idle" ? "0%" : `${state.progress * 100}%`;
+  barFill.style.width = state.mode === "idle" ? "0%" : `${state.progress * 100}%`;
 }
 
 // ─── Fullscreen ───────────────────────────────────────────────────────────────
@@ -47,83 +37,94 @@ document.addEventListener("fullscreenchange", () => {
 
 // ─── Favicon overlay ─────────────────────────────────────────────────────────
 
-function getFaviconLink() {
-  return (
-    document.querySelector('link[rel~="icon"]') ||
-    document.querySelector('link[rel="shortcut icon"]')
-  );
-}
+const faviconOverlay = (() => {
+  let originalHref = null;
+  let linkEl = null;
+  let gen = 0;
 
-function applyFaviconOverlay(mode) {
-  const gen = ++_faviconGen;
-  faviconLinkEl = faviconLinkEl || getFaviconLink();
-
-  // Preserve original href once
-  if (!originalFaviconHref) {
-    originalFaviconHref = faviconLinkEl ? faviconLinkEl.href : null;
+  function getFaviconLink() {
+    return (
+      document.querySelector('link[rel~="icon"]') ||
+      document.querySelector('link[rel="shortcut icon"]')
+    );
   }
 
-  const size = 32;
-  const canvas = document.createElement("canvas");
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext("2d");
+  function setFaviconDataUrl(dataUrl) {
+    if (!linkEl) {
+      linkEl = document.createElement("link");
+      linkEl.rel = "icon";
+      document.head.appendChild(linkEl);
+    }
+    linkEl.href = dataUrl;
+  }
 
-  const color = mode === "work" ? "#E05A4A" : "#52C78E";
+  function applyFaviconOverlay(mode) {
+    const myGen = ++gen;
+    linkEl = linkEl || getFaviconLink();
 
-  const drawOverlay = () => {
-    // Small dot in bottom-right corner
-    ctx.beginPath();
-    ctx.arc(size - 7, size - 7, 6, 0, Math.PI * 2);
-    ctx.fillStyle = color;
-    ctx.fill();
-    ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
+    // Preserve original href once
+    if (!originalHref) {
+      originalHref = linkEl ? linkEl.href : null;
+    }
 
-    setFaviconDataUrl(canvas.toDataURL("image/png"));
-  };
+    const size = 32;
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d");
 
-  const src = originalFaviconHref || null;
-  if (src) {
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => {
-      if (gen !== _faviconGen) return;
-      try {
-        ctx.drawImage(img, 0, 0, size, size);
-        drawOverlay();
-      } catch (_) {
-        // Canvas tainted by cross-origin image — just show dot
-        ctx.clearRect(0, 0, size, size);
-        drawOverlay();
-      }
+    const color = mode === "work" ? "#E05A4A" : "#52C78E";
+
+    const drawOverlay = () => {
+      // Small dot in bottom-right corner
+      ctx.beginPath();
+      ctx.arc(size - 7, size - 7, 6, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      setFaviconDataUrl(canvas.toDataURL("image/png"));
     };
-    img.onerror = () => {
-      if (gen !== _faviconGen) return;
+
+    const src = originalHref || null;
+    if (src) {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => {
+        if (myGen !== gen) return;
+        try {
+          ctx.drawImage(img, 0, 0, size, size);
+          drawOverlay();
+        } catch (_) {
+          // Canvas tainted by cross-origin image — just show dot
+          ctx.clearRect(0, 0, size, size);
+          drawOverlay();
+        }
+      };
+      img.onerror = () => {
+        if (myGen !== gen) return;
+        drawOverlay();
+      };
+      img.src = src;
+    } else {
       drawOverlay();
-    };
-    img.src = src;
-  } else {
-    drawOverlay();
+    }
   }
-}
 
-function setFaviconDataUrl(dataUrl) {
-  if (!faviconLinkEl) {
-    faviconLinkEl = document.createElement("link");
-    faviconLinkEl.rel = "icon";
-    document.head.appendChild(faviconLinkEl);
+  function removeFaviconOverlay() {
+    ++gen;
+    if (!linkEl || !originalHref) return;
+    linkEl.href = originalHref;
+    originalHref = null;
   }
-  faviconLinkEl.href = dataUrl;
-}
 
-function removeFaviconOverlay() {
-  ++_faviconGen;
-  if (!faviconLinkEl || !originalFaviconHref) return;
-  faviconLinkEl.href = originalFaviconHref;
-  originalFaviconHref = null;
-}
+  return {
+    apply(mode) { applyFaviconOverlay(mode); },
+    remove() { removeFaviconOverlay(); },
+  };
+})();
 
 // ─── State updates ────────────────────────────────────────────────────────────
 
@@ -134,9 +135,9 @@ function applyState(state, tabId) {
   const shouldBind = nowBound && state.mode !== "idle";
 
   if (shouldBind && (!isBound || state.mode !== lastMode)) {
-    applyFaviconOverlay(state.mode);
+    faviconOverlay.apply(state.mode);
   } else if (!shouldBind && isBound) {
-    removeFaviconOverlay();
+    faviconOverlay.remove();
   }
   isBound = shouldBind;
   lastMode = state.mode;
@@ -156,7 +157,7 @@ document.addEventListener("visibilitychange", () => {
 browser.runtime.onMessage.addListener((msg) => {
   if (msg.type === "UPDATE_BAR") {
     if (myTabId === null) { pendingMsg = msg; return; }
-    applyState(msg, myTabId);
+    applyState(msg.state, myTabId);
   }
 });
 
@@ -166,7 +167,7 @@ browser.runtime.sendMessage({ type: "CONTENT_READY" }).then((response) => {
   myTabId = response.tabId;
   applyState(response.state, myTabId);
   if (pendingMsg) {
-    applyState(pendingMsg, myTabId);
+    applyState(pendingMsg.state, myTabId);
     pendingMsg = null;
   }
 }).catch(() => {});
