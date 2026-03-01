@@ -14,16 +14,18 @@ document.querySelector(".tabs").addEventListener("click", (e) => {
 
 // ─── Timer tab ────────────────────────────────────────────────────────────────
 
-const elLabel     = document.getElementById("session-label");
-const elCountdown = document.getElementById("countdown");
-const elFill      = document.getElementById("progress-fill");
-const elPause     = document.getElementById("pause-label");
-const elStart     = document.getElementById("btn-start");
-const elStop      = document.getElementById("btn-stop");
-const elSkip      = document.getElementById("btn-skip");
-const elBind          = document.getElementById("btn-bind");
-const elBindStatus    = document.getElementById("bind-status");
+const elLabel         = document.getElementById("session-label");
+const elCountdown     = document.getElementById("countdown");
+const elFill          = document.getElementById("progress-fill");
+const elPause         = document.getElementById("pause-label");
+const elStart         = document.getElementById("btn-start");
+const elStop          = document.getElementById("btn-stop");
+const elSkip          = document.getElementById("btn-skip");
 const elDotsContainer = document.querySelector(".dots");
+
+// Resolved once on popup open; every outgoing action message includes this tabId
+// so the background routes to the correct TimerInstance.
+let currentTabId = null;
 
 function msToMinSecCeil(ms) {
   const s = Math.ceil(ms / 1000);
@@ -67,7 +69,7 @@ function updateButtonVisibility(mode) {
 }
 
 function renderTimerState(state) {
-  const { mode, progress, remaining, autoPaused, pomodoroCount, boundTabId, settings } = state;
+  const { mode, progress, remaining, autoPaused, pomodoroCount, settings } = state;
 
   // Session label
   elLabel.textContent = MODE_LABEL[mode] || "IDLE";
@@ -105,31 +107,18 @@ function renderTimerState(state) {
 
   // Buttons
   updateButtonVisibility(mode);
-
-  // Bind button
-  const bound = boundTabId !== null;
-  const sessionActive = mode !== "idle";
-  elBind.textContent = bound ? "Unbind tab" : "Bind to tab";
-  elBind.classList.toggle("bound", bound);
-  elBind.disabled = sessionActive;
-  elBindStatus.textContent = bound ? "tab-bound timer" : "";
 }
 
 elStart.addEventListener("click", () => {
-  browser.runtime.sendMessage({ type: "START" });
+  browser.runtime.sendMessage({ type: "START", tabId: currentTabId });
 });
 
 elStop.addEventListener("click", () => {
-  browser.runtime.sendMessage({ type: "STOP" });
+  browser.runtime.sendMessage({ type: "STOP", tabId: currentTabId });
 });
 
 elSkip.addEventListener("click", () => {
-  browser.runtime.sendMessage({ type: "SKIP_BREAK" });
-});
-
-elBind.addEventListener("click", () => {
-  const type = elBind.classList.contains("bound") ? "UNBIND_TAB" : "BIND_TAB";
-  browser.runtime.sendMessage({ type });
+  browser.runtime.sendMessage({ type: "SKIP_BREAK", tabId: currentTabId });
 });
 
 // ─── History tab ──────────────────────────────────────────────────────────────
@@ -250,13 +239,17 @@ document.getElementById("settings-form").addEventListener("submit", (e) => {
 // ─── State sync ───────────────────────────────────────────────────────────────
 
 browser.runtime.onMessage.addListener((msg) => {
-  if (msg.type === "STATE_UPDATE") {
+  // Only apply updates for the tab this popup is showing.
+  if (msg.type === "STATE_UPDATE" && msg.tabId === currentTabId) {
     renderTimerState(msg.state);
   }
 });
 
-// Fetch initial state on popup open
-browser.runtime.sendMessage({ type: "GET_STATE" }).then((state) => {
+// Resolve the active tab first so every action message carries the correct tabId.
+browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+  currentTabId = tab?.id ?? null;
+  return browser.runtime.sendMessage({ type: "GET_STATE", tabId: currentTabId });
+}).then((state) => {
   renderTimerState(state);
   loadSettings(state.settings);
 });
