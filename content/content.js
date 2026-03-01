@@ -3,6 +3,8 @@
 let myTabId = null;
 let isBound = false;
 let lastMode = null;
+// UPDATE_BAR can arrive before CONTENT_READY resolves — buffer it so the first
+// push is not lost. Replayed immediately after myTabId is established.
 let bufferedUpdate = null;
 
 // ─── Bar ─────────────────────────────────────────────────────────────────────
@@ -104,7 +106,7 @@ const faviconOverlay = (() => {
       const img = new Image();
       img.crossOrigin = "anonymous";
       img.onload = () => {
-        if (myGen !== gen) return;
+        if (myGen !== gen) return; // stale: a newer applyFaviconOverlay call has taken over
         try {
           _ctx.drawImage(img, 0, 0, FAVICON_SIZE, FAVICON_SIZE);
           drawOverlay();
@@ -138,11 +140,12 @@ const faviconOverlay = (() => {
 
 // ─── State updates ────────────────────────────────────────────────────────────
 
-function applyState(state, tabId) {
+// Each content script only receives UPDATE_BAR for its own tab, so no binding
+// check is needed — active mode means this tab's timer is running.
+function applyState(state) {
   updateBar(state);
 
-  const nowBound = state.boundTabId !== null && tabId === state.boundTabId;
-  const shouldBind = nowBound && state.mode !== "idle";
+  const shouldBind = state.mode !== "idle";
 
   if (shouldBind && (!isBound || state.mode !== lastMode)) {
     faviconOverlay.apply(state.mode);
@@ -155,10 +158,14 @@ function applyState(state, tabId) {
 
 // ─── Visibility sync ──────────────────────────────────────────────────────────
 
+// Re-sync when the tab becomes visible: content scripts in background tabs may
+// miss UPDATE_BAR pushes while suspended. The background also sends a fresh
+// broadcastState via checkBoundTabActivity, but this covers the edge case where
+// that push races ahead of the tab fully becoming active.
 document.addEventListener("visibilitychange", () => {
   if (document.hidden || myTabId === null) return;
-  browser.runtime.sendMessage({ type: "GET_STATE" }).then((state) => {
-    applyState(state, myTabId);
+  browser.runtime.sendMessage({ type: "GET_STATE", tabId: myTabId }).then((state) => {
+    applyState(state);
   // extension context unavailable (update in flight) — nothing to apply
   }).catch(() => {});
 });
@@ -168,7 +175,7 @@ document.addEventListener("visibilitychange", () => {
 browser.runtime.onMessage.addListener((msg) => {
   if (msg.type === "UPDATE_BAR") {
     if (myTabId === null) { bufferedUpdate = msg; return; }
-    applyState(msg.state, myTabId);
+    applyState(msg.state);
   }
 });
 
@@ -176,9 +183,9 @@ browser.runtime.onMessage.addListener((msg) => {
 
 browser.runtime.sendMessage({ type: "CONTENT_READY" }).then((response) => {
   myTabId = response.tabId;
-  applyState(response.state, myTabId);
+  applyState(response.state);
   if (bufferedUpdate) {
-    applyState(bufferedUpdate.state, myTabId);
+    applyState(bufferedUpdate.state);
     bufferedUpdate = null;
   }
 // background not yet ready; content script will re-init on next CONTENT_READY

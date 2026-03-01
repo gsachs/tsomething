@@ -475,6 +475,10 @@ async function init() {
     pomodoroCount = Number.isInteger(stored.pomodoroCount) ? stored.pomodoroCount : 0;
   }
 
+  // IMPORTANT: mark ready before the async restore loop so any incoming messages
+  // (START, STOP, etc.) during restore are handled rather than rejected. GET_STATE
+  // and CONTENT_READY already bypass this gate, but other messages would silently
+  // fail if initialization remained false during Promise.all(restorePromises).
   initialized = true;
 
   // Restore multi-instance state.

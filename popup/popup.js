@@ -89,6 +89,8 @@ function renderTimerState(state) {
 
   // Filled dots = completed pomos in the current cycle
   const interval = settings?.longBreakInterval ?? 4;
+  // Only rebuild the dot elements when longBreakInterval itself changes; avoids
+  // replacing DOM nodes on every state tick when the count is the same.
   if (elDotsContainer.children.length !== interval) {
     elDotsContainer.replaceChildren(
       ...Array.from({ length: interval }, () => {
