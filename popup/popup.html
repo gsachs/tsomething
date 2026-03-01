@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pomo</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+
+  <!-- Tab bar -->
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="timer">Timer</button>
+    <button class="tab-btn" data-tab="history">History</button>
+    <button class="tab-btn" data-tab="settings">Settings</button>
+  </nav>
+
+  <!-- ── Timer tab ── -->
+  <section class="tab-panel active" id="tab-timer">
+    <div class="session-label" id="session-label">IDLE</div>
+
+    <div class="dots" id="pomo-dots">
+      <span class="dot"></span>
+      <span class="dot"></span>
+      <span class="dot"></span>
+      <span class="dot"></span>
+    </div>
+
+    <div class="countdown" id="countdown">25:00</div>
+
+    <div class="progress-track">
+      <div class="progress-fill" id="progress-fill"></div>
+    </div>
+
+    <div class="pause-label" id="pause-label">Paused (tab inactive)</div>
+
+    <div class="actions">
+      <button class="btn-primary" id="btn-start">Start</button>
+      <button class="btn-secondary hidden" id="btn-stop">Stop</button>
+      <button class="btn-skip hidden" id="btn-skip">Skip break</button>
+    </div>
+
+    <div class="bind-row">
+      <button class="btn-bind" id="btn-bind">Bind to tab</button>
+      <span class="bind-status" id="bind-status"></span>
+    </div>
+  </section>
+
+  <!-- ── History tab ── -->
+  <section class="tab-panel" id="tab-history">
+    <div class="history-list" id="history-list">
+      <div class="empty-state">No sessions yet</div>
+    </div>
+    <button class="btn-clear" id="btn-clear">Clear all</button>
+  </section>
+
+  <!-- ── Settings tab ── -->
+  <section class="tab-panel" id="tab-settings">
+    <form id="settings-form">
+      <label class="field">
+        <span>Work duration</span>
+        <div class="input-row">
+          <input type="number" id="s-work" min="1" max="120" value="25" />
+          <span class="unit">min</span>
+        </div>
+      </label>
+      <label class="field">
+        <span>Break duration</span>
+        <div class="input-row">
+          <input type="number" id="s-break" min="1" max="60" value="5" />
+          <span class="unit">min</span>
+        </div>
+      </label>
+      <label class="field">
+        <span>Long break duration</span>
+        <div class="input-row">
+          <input type="number" id="s-long" min="1" max="120" value="15" />
+          <span class="unit">min</span>
+        </div>
+      </label>
+      <label class="field">
+        <span>Long break after</span>
+        <div class="input-row">
+          <input type="number" id="s-interval" min="1" max="10" value="4" />
+          <span class="unit">pomos</span>
+        </div>
+      </label>
+      <label class="field">
+        <span>Count as done at</span>
+        <div class="input-row">
+          <input type="number" id="s-threshold" min="1" max="100" value="80" />
+          <span class="unit">%</span>
+        </div>
+      </label>
+      <button type="submit" class="btn-save">Save</button>
+    </form>
+    <div class="save-notice hidden" id="save-notice">Saved!</div>
+  </section>
+
+  <script src="popup.js"></script>
+</body>
+</html>

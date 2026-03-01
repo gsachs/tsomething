@@ -1,0 +1,35 @@
+{
+  "manifest_version": 2,
+  "name": "Pomo",
+  "version": "1.0.0",
+  "description": "A focused Pomodoro timer for Firefox",
+  "icons": {
+    "48": "icons/icon.svg",
+    "96": "icons/icon.svg"
+  },
+  "browser_action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": "icons/icon.svg",
+    "default_title": "Pomo"
+  },
+  "background": {
+    "scripts": ["background/background.js"],
+    "persistent": true
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content/content.js"],
+      "css": ["content/content.css"],
+      "run_at": "document_end",
+      "all_frames": false
+    }
+  ],
+  "permissions": [
+    "tabs",
+    "storage",
+    "notifications",
+    "http://*/*",
+    "https://*/*"
+  ]
+}
