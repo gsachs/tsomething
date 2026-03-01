@@ -14,7 +14,6 @@ const DEFAULT_SETTINGS = {
   completionThreshold: 80,
 };
 
-// Change 2 (todo 002): sanitize and clamp all settings fields at boundaries.
 function sanitizeSettings(raw) {
   return {
     workDuration:        Math.max(1, Math.min(120, parseInt(raw.workDuration)        || 25)),
@@ -42,11 +41,17 @@ const state = {
 let settings = { ...DEFAULT_SETTINGS };
 let tickInterval = null;
 
-// Change 6 (todo 006): timer handle for debouncing activity checks.
+// Debounces rapid activation/focus events to avoid redundant tab queries.
 let _activityCheckTimer = null;
 
-// Change 8 (todo 013): gate messages until init() completes.
+// Gates message handling until init() completes.
 let initialized = false;
+
+let _historyChain = Promise.resolve();
+
+let _lastBadgeText = null;
+
+let _activityCheckGen = 0;
 
 // ─── Elapsed helpers ─────────────────────────────────────────────────────────
 
@@ -81,14 +86,13 @@ function stopTick() {
 function tick() {
   if (state.autoPaused || state.mode === "idle") return;
 
-  // Change 7 (todo 012): use currentElapsed() for consistency.
   state.elapsedMs = currentElapsed();
 
   if (state.elapsedMs >= state.sessionDuration) {
     state.elapsedMs = state.sessionDuration;
     onSessionComplete();
   } else {
-    // Change 5 (todo 005): persistState removed from hot tick path.
+    // Persist only on state transitions, not on every tick.
     broadcastState();
     updateBadge();
   }
@@ -105,36 +109,36 @@ function durationFor(mode) {
   }
 }
 
-function startSession(mode) {
+async function startSession(mode) {
   state.mode = mode;
   state.sessionDuration = durationFor(mode);
   state.elapsedMs = 0;
-  state.startTimestamp = Date.now();
+  const now = Date.now();
+  state.startTimestamp = now;
   state.autoPaused = false;
-  state.sessionStart = Date.now();
+  state.sessionStart = now;
 
   if (state.boundTabId !== null) {
-    browser.tabs.get(state.boundTabId).then((tab) => {
-      try { state.sessionDomain = new URL(tab.url).hostname; }
-      catch { state.sessionDomain = null; }
-    }).catch(() => { state.sessionDomain = null; });
+    try {
+      const tab = await browser.tabs.get(state.boundTabId);
+      state.sessionDomain = new URL(tab.url).hostname;
+    } catch { state.sessionDomain = null; }
   } else {
     state.sessionDomain = null;
   }
 
   startTick();
-  // Change 7 (todo 012): set badge color once at session start, not on every tick.
+  // Badge color is set once per session start; only text changes on tick.
   browser.browserAction.setBadgeBackgroundColor({
     color: mode === "work" ? "#E05A4A" : "#52C78E",
   });
   broadcastState();
-  persistState();
+  safePersist();
   updateBadge();
 }
 
 function stopSession() {
   if (state.mode === "idle") return;
-  // Change 4 (todo 010): consolidated into finalizeWorkSession.
   finalizeWorkSession(false);
   resetToIdle();
 }
@@ -143,15 +147,11 @@ function onSessionComplete() {
   stopTick();
 
   if (state.mode === "work") {
-    // Change 4 (todo 010): replace inline logSession + pomodoroCount++ with finalizeWorkSession.
     finalizeWorkSession(true);
   }
 
   const wasWork = state.mode === "work";
   const pomosBeforeReset = state.pomodoroCount;
-
-  // Change 4 (todo 010): dead block removed — mode is always "work" here,
-  // so the longBreak branch could never execute.
 
   notify(wasWork, pomosBeforeReset);
 
@@ -168,7 +168,6 @@ function onSessionComplete() {
 
 function skipBreak() {
   if (state.mode !== "break" && state.mode !== "longBreak") return;
-  stopTick();
   resetToIdle();
 }
 
@@ -180,7 +179,7 @@ function resetToIdle() {
   state.autoPaused = false;
   stopTick();
   broadcastState();
-  persistState();
+  safePersist();
   updateBadge();
 }
 
@@ -190,23 +189,24 @@ function bindToCurrentTab() {
   browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
     if (!tabs.length) return;
     state.boundTabId = tabs[0].id;
-    persistState();
+    safePersist();
     broadcastState();
   });
 }
 
 function unbindTab() {
   state.boundTabId = null;
-  persistState();
+  safePersist();
   broadcastState();
 }
 
-// Change 6 (todo 006): single atomic query replaces the nested
-// tabs.query + windows.getCurrent pair; lastFocusedWindow covers all windows.
+// lastFocusedWindow covers all windows in a single query, avoiding a nested tabs+windows call.
 function checkBoundTabActivity() {
   if (state.boundTabId === null || state.mode === "idle") return;
+  const myGen = ++_activityCheckGen;
 
   browser.tabs.query({ active: true, lastFocusedWindow: true }).then((tabs) => {
+    if (myGen !== _activityCheckGen) return;
     const isActive = tabs.length > 0 && tabs[0].id === state.boundTabId;
 
     if (isActive && state.autoPaused) {
@@ -214,18 +214,17 @@ function checkBoundTabActivity() {
       state.startTimestamp = Date.now() - state.elapsedMs;
       state.autoPaused = false;
       broadcastState();
-      persistState();
+      safePersist();
     } else if (!isActive && !state.autoPaused) {
       // Auto-pause: snapshot elapsed
       state.elapsedMs = Date.now() - state.startTimestamp;
       state.autoPaused = true;
       broadcastState();
-      persistState();
+      safePersist();
     }
   });
 }
 
-// Change 6 (todo 006): debounce rapid activation/focus events into one check.
 function scheduleActivityCheck() {
   clearTimeout(_activityCheckTimer);
   _activityCheckTimer = setTimeout(checkBoundTabActivity, 50);
@@ -237,8 +236,7 @@ browser.windows.onFocusChanged.addListener(scheduleActivityCheck);
 browser.tabs.onRemoved.addListener((tabId) => {
   if (tabId !== state.boundTabId) return;
 
-  // Change 4 (todo 010): bound tab closed — use finalizeWorkSession instead of
-  // inline logic; counts as abandoned if work session met threshold.
+  // Bound tab closed; treat as an abandoned session.
   finalizeWorkSession(false);
 
   state.boundTabId = null;
@@ -247,44 +245,41 @@ browser.tabs.onRemoved.addListener((tabId) => {
 
 // ─── History ──────────────────────────────────────────────────────────────────
 
-// Change 4 (todo 010): maybeLogWork replaced by finalizeWorkSession, which also
-// handles the pomodoroCount increment, eliminating duplicate increment paths.
 function finalizeWorkSession(fullyCompleted) {
   if (state.mode !== "work") return;
   const pct = fullyCompleted ? 100 : progress() * 100;
   const counted = fullyCompleted || pct >= settings.completionThreshold;
   if (counted) state.pomodoroCount++;
-  logSession(counted, pct);
+  logSession(counted, pct).catch((err) => {
+    console.error("[pomo] logSession failed:", err);
+  });
 }
 
-async function appendToHistory(entry) {
-  const stored = await browser.storage.local.get("history");
-  let history = stored.history || [];
-  history.push(entry);
-  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-  history = history.filter((e) => e.startTime > cutoff);
-  await browser.storage.local.set({ history });
+function appendToHistory(entry) {
+  _historyChain = _historyChain.then(async () => {
+    const stored = await browser.storage.local.get("history");
+    let history = stored.history || [];
+    history.push(entry);
+    await browser.storage.local.set({ history });
+  });
+  return _historyChain;
 }
 
-// Change 3 (todo 003): snapshot mutable state synchronously before the first
-// await so async storage reads see a consistent picture of the session.
+// Snapshot mutable state synchronously before any await so storage reads see a consistent session picture.
 async function logSession(completed, pctComplete) {
   const snapshot = {
     mode: state.mode,
     domain: state.sessionDomain,
     startTime: state.sessionStart,
-    duration: state.sessionDuration,
     elapsed: Math.round(currentElapsed()),
   };
   if (snapshot.mode === "idle") return;
 
   const entry = {
-    id: Date.now().toString(36) + Math.random().toString(36).slice(2),
     type: snapshot.mode,
     domain: snapshot.domain,
     startTime: snapshot.startTime,
     endTime: Date.now(),
-    duration: snapshot.duration,
     elapsed: snapshot.elapsed,
     completed,
     pctComplete: Math.round(pctComplete),
@@ -318,15 +313,21 @@ function notify(wasWork, pomosCompleted) {
 
 function updateBadge() {
   if (state.mode === "idle") {
-    browser.browserAction.setBadgeText({ text: "" });
+    if (_lastBadgeText !== "") {
+      browser.browserAction.setBadgeText({ text: "" });
+      _lastBadgeText = "";
+    }
     return;
   }
 
   const mins = Math.ceil(remaining() / 60000);
   const label = state.mode === "work" ? String(mins) : state.mode === "longBreak" ? "LB" : "B";
 
-  // Change 7 (todo 012): color is set once in startSession(); only text here.
-  browser.browserAction.setBadgeText({ text: label });
+  // Badge color is set once per session in startSession(); only text changes here.
+  if (label !== _lastBadgeText) {
+    browser.browserAction.setBadgeText({ text: label });
+    _lastBadgeText = label;
+  }
 }
 
 // ─── Broadcasting ─────────────────────────────────────────────────────────────
@@ -336,7 +337,6 @@ function publicState() {
     mode: state.mode,
     progress: progress(),
     remaining: remaining(),
-    // Change 5 (todo 005): sessionDuration removed from public surface.
     autoPaused: state.autoPaused,
     pomodoroCount: state.pomodoroCount,
     boundTabId: state.boundTabId,
@@ -344,8 +344,7 @@ function publicState() {
   };
 }
 
-// Change 5 (todo 005): send UPDATE_BAR only to bound tab; avoid broadcasting
-// to every content script on every tick.
+// Send UPDATE_BAR only to the bound tab to avoid flooding unrelated content scripts.
 function broadcastState() {
   const ps = publicState();
 
@@ -362,62 +361,68 @@ function broadcastState() {
 
 // ─── Persistence ──────────────────────────────────────────────────────────────
 
-function serializeState() {
-  return {
-    mode: state.mode,
-    boundTabId: state.boundTabId,
-    startTimestamp: state.startTimestamp,
-    elapsedMs: state.elapsedMs,
-    sessionDuration: state.sessionDuration,
-    autoPaused: state.autoPaused,
-    pomodoroCount: state.pomodoroCount,
-    sessionStart: state.sessionStart,
-    sessionDomain: state.sessionDomain,
-  };
+async function persistState() {
+  await browser.storage.local.set({ timerState: { ...state } });
+}
+
+function safePersist() {
+  persistState().catch((err) => {
+    console.error("[pomo] persistState failed:", err);
+  });
+}
+
+function validateStoredState(s) {
+  const VALID_MODES = ["idle", "work", "break", "longBreak"];
+  if (!VALID_MODES.includes(s.mode)) s.mode = "idle";
+  if (!Number.isFinite(s.elapsedMs) || s.elapsedMs < 0) s.elapsedMs = 0;
+  if (s.boundTabId !== null && !Number.isInteger(s.boundTabId)) s.boundTabId = null;
+  if (!Number.isFinite(s.sessionDuration) || s.sessionDuration <= 0) s.sessionDuration = null;
+  if (!Number.isInteger(s.pomodoroCount) || s.pomodoroCount < 0) s.pomodoroCount = 0;
+  return s;
 }
 
 function deserializeState(s) {
+  s = validateStoredState(s);
   Object.assign(state, s);
   if (!s.autoPaused && s.startTimestamp) {
     const elapsed = Date.now() - s.startTimestamp;
-    if (elapsed >= s.sessionDuration) return "completed";
+    if (elapsed >= s.sessionDuration) {
+      state.elapsedMs = s.sessionDuration;
+      state.startTimestamp = Date.now() - s.sessionDuration;
+      return true;
+    }
     state.elapsedMs = elapsed;
     state.startTimestamp = Date.now() - state.elapsedMs;
   }
-  return "resumed";
-}
-
-async function persistState() {
-  await browser.storage.local.set({ timerState: serializeState() });
+  return false;
 }
 
 async function init() {
-  const stored = await browser.storage.local.get(["settings", "timerState"]);
+  const stored = await browser.storage.local.get(["settings", "timerState", "history"]);
 
   if (stored.settings) {
-    // Change 2 (todo 011): sanitizeSettings applied on load, not raw merge.
     settings = sanitizeSettings({ ...DEFAULT_SETTINGS, ...stored.settings });
   }
 
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  history = (stored.history || []).filter((e) => e.startTime > cutoff);
+
+  initialized = true;
+
   if (stored.timerState && stored.timerState.mode !== "idle") {
     const result = deserializeState(stored.timerState);
-    if (result === "completed") { onSessionComplete(); return; }
+    if (result) { onSessionComplete(); return; }
     startTick();
     updateBadge();
   }
-
-  // Change 8 (todo 013): signal that init is done; messages arriving before
-  // this point (except CONTENT_READY / GET_STATE) are rejected.
-  initialized = true;
 }
 
 // ─── Message handler ──────────────────────────────────────────────────────────
 
 browser.runtime.onMessage.addListener((msg, sender, reply) => {
-  // Change 1 (todo 001): reject messages from other extensions.
   if (sender.id && sender.id !== browser.runtime.id) return false;
 
-  // Change 8 (todo 013): reject non-essential messages before init completes.
+  // Reject non-essential messages before init completes.
   if (!initialized && msg.type !== "CONTENT_READY" && msg.type !== "GET_STATE") {
     reply({ error: "not ready" });
     return false;
@@ -432,24 +437,38 @@ browser.runtime.onMessage.addListener((msg, sender, reply) => {
       reply({ tabId: sender.tab.id, state: publicState() });
       return false;
 
-    case "START":
-      startSession("work");
+    case "START": {
+      const mode = ["work", "break", "longBreak"].includes(msg.mode) ? msg.mode : "work";
+      startSession(mode);
       reply({ ok: true });
       return false;
+    }
 
     case "STOP":
+      if (state.mode === "idle") { reply({ ok: false, reason: "not running" }); return false; }
       stopSession();
       reply({ ok: true });
       return false;
 
     case "SKIP_BREAK":
+      if (state.mode !== "break" && state.mode !== "longBreak") {
+        reply({ ok: false, reason: "not in break" });
+        return false;
+      }
       skipBreak();
       reply({ ok: true });
       return false;
 
     case "BIND_TAB":
-      bindToCurrentTab();
-      reply({ ok: true });
+      if (msg.tabId) {
+        state.boundTabId = msg.tabId;
+        safePersist();
+        broadcastState();
+        reply({ ok: true });
+      } else {
+        bindToCurrentTab();
+        reply({ ok: true });
+      }
       return false;
 
     case "UNBIND_TAB":
@@ -458,17 +477,20 @@ browser.runtime.onMessage.addListener((msg, sender, reply) => {
       return false;
 
     case "GET_HISTORY":
-      browser.storage.local.get("history").then((s) => reply(s.history || []));
-      return true; // async
+      browser.storage.local.get("history").then((s) => {
+        const history = (s.history || []).filter((e) => e.type === "work");
+        reply(history);
+      });
+      return true;
 
     case "SAVE_SETTINGS": {
-      // Change 2 (todo 011): destructure to accept only known fields, then sanitize.
+      // Accept only known fields before sanitizing to prevent prototype pollution.
       const { workDuration, breakDuration, longBreakDuration,
               longBreakInterval, completionThreshold } = msg.settings;
       settings = sanitizeSettings({ workDuration, breakDuration,
                                     longBreakDuration, longBreakInterval, completionThreshold });
       browser.storage.local.set({ settings });
-      reply({ ok: true });
+      reply({ ok: true, settings: { ...settings } });
       return false;
     }
 
@@ -478,7 +500,7 @@ browser.runtime.onMessage.addListener((msg, sender, reply) => {
       return false;
 
     default:
-      // Change 8 (todo 013): surface unknown message types instead of silently ignoring.
+      // Surface unknown message types rather than silently ignoring them.
       reply({ error: "unknown message type", type: msg.type });
       return false;
   }

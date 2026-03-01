@@ -9,7 +9,6 @@
   z-index: 2147483647;
   pointer-events: none;
   background: transparent;
-  transition: height 0.3s ease;
 }
 
 #pomo-bar-root.pomo-fullscreen {
@@ -37,4 +36,8 @@
 #pomo-bar-root[data-mode="idle"] #pomo-bar-fill,
 #pomo-bar-root[data-mode="paused"] #pomo-bar-fill {
   opacity: 0.4;
+}
+
+#pomo-bar-root[data-mode="idle"] #pomo-bar-fill {
+  transition: none;
 }

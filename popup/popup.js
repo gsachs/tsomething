@@ -21,8 +21,9 @@ const elPause     = document.getElementById("pause-label");
 const elStart     = document.getElementById("btn-start");
 const elStop      = document.getElementById("btn-stop");
 const elSkip      = document.getElementById("btn-skip");
-const elBind      = document.getElementById("btn-bind");
-const elBindStatus = document.getElementById("bind-status");
+const elBind          = document.getElementById("btn-bind");
+const elBindStatus    = document.getElementById("bind-status");
+const elDotsContainer = document.querySelector(".dots");
 
 function msToMinSecCeil(ms) {
   const s = Math.ceil(ms / 1000);
@@ -35,7 +36,7 @@ function msToMinSecRound(ms) {
 }
 
 function formatTime(ms) {
-  const [m, s] = msToMinSecCeil(ms);
+  const [m, s] = msToMinSecCeil(ms);   // ceil: countdown never shows 00:00 prematurely
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
@@ -86,9 +87,8 @@ function renderTimerState(state) {
 
   // Filled dots = completed pomos in the current cycle
   const interval = settings?.longBreakInterval ?? 4;
-  const dotsContainer = document.querySelector(".dots");
-  if (dotsContainer.children.length !== interval) {
-    dotsContainer.replaceChildren(
+  if (elDotsContainer.children.length !== interval) {
+    elDotsContainer.replaceChildren(
       ...Array.from({ length: interval }, () => {
         const s = document.createElement("span");
         s.className = "dot";
@@ -96,7 +96,7 @@ function renderTimerState(state) {
       })
     );
   }
-  dotsContainer.querySelectorAll(".dot").forEach((dot, i) => {
+  elDotsContainer.querySelectorAll(".dot").forEach((dot, i) => {
     dot.classList.toggle("filled", i < pomodoroCount % interval);
   });
 
@@ -112,8 +112,6 @@ function renderTimerState(state) {
   elBind.textContent = bound ? "Unbind tab" : "Bind to tab";
   elBind.classList.toggle("bound", bound);
   elBind.disabled = sessionActive;
-  elBind.style.opacity = sessionActive ? "0.4" : "";
-  elBind.style.cursor = sessionActive ? "default" : "";
   elBindStatus.textContent = bound ? "tab-bound timer" : "";
 }
 
@@ -139,7 +137,7 @@ elBind.addEventListener("click", () => {
 const elHistoryList = document.getElementById("history-list");
 
 function fmtDuration(ms) {
-  const [m, s] = msToMinSecRound(ms);
+  const [m, s] = msToMinSecRound(ms);  // round: accurate elapsed display in history
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
@@ -251,18 +249,14 @@ document.getElementById("settings-form").addEventListener("submit", (e) => {
 
 // ─── State sync ───────────────────────────────────────────────────────────────
 
-let popupReady = false;
-
 browser.runtime.onMessage.addListener((msg) => {
-  if (msg.type === "STATE_UPDATE" && popupReady) {
+  if (msg.type === "STATE_UPDATE") {
     renderTimerState(msg.state);
-    loadSettings(msg.state.settings);
   }
 });
 
 // Fetch initial state on popup open
 browser.runtime.sendMessage({ type: "GET_STATE" }).then((state) => {
-  popupReady = true;
   renderTimerState(state);
   loadSettings(state.settings);
 });

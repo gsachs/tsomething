@@ -122,7 +122,6 @@ body {
   width: 0%;
   border-radius: 3px;
   transition: width 1s linear, background 0.4s;
-  background: var(--muted);
 }
 
 .progress-fill.work   { background: var(--work); }
@@ -165,7 +164,6 @@ body {
 .btn-skip:active { transform: scale(0.97); }
 
 .btn-primary  { background: var(--work); color: #fff; }
-.btn-primary.break-mode { background: var(--break); }
 
 .btn-secondary { background: var(--border); color: var(--muted); }
 .btn-secondary:hover { color: var(--text); }
@@ -203,6 +201,7 @@ body {
 
 .btn-bind:hover { color: var(--text); border-color: var(--muted); }
 .btn-bind.bound { border-color: var(--accent); color: var(--accent); }
+#btn-bind:disabled { opacity: 0.4; cursor: default; }
 
 .bind-status {
   font-size: 11px;

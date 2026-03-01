@@ -3,7 +3,7 @@
 let myTabId = null;
 let isBound = false;
 let lastMode = null;
-let pendingMsg = null;
+let bufferedUpdate = null;
 
 // ─── Bar ─────────────────────────────────────────────────────────────────────
 
@@ -42,6 +42,17 @@ const faviconOverlay = (() => {
   let linkEl = null;
   let gen = 0;
 
+  const FAVICON_SIZE = 32;
+  const DOT_RADIUS = 6;
+  const DOT_MARGIN = 1;  // px gap between dot edge and canvas edge
+  const DOT_CENTER = FAVICON_SIZE - DOT_RADIUS - DOT_MARGIN;  // = 25
+  const DOT_STROKE_WIDTH = 1.5;
+
+  const _canvas = document.createElement("canvas");
+  _canvas.width = FAVICON_SIZE;
+  _canvas.height = FAVICON_SIZE;
+  const _ctx = _canvas.getContext("2d");
+
   function getFaviconLink() {
     return (
       document.querySelector('link[rel~="icon"]') ||
@@ -67,39 +78,39 @@ const faviconOverlay = (() => {
       originalHref = linkEl ? linkEl.href : null;
     }
 
-    const size = 32;
-    const canvas = document.createElement("canvas");
-    canvas.width = size;
-    canvas.height = size;
-    const ctx = canvas.getContext("2d");
-
     const color = mode === "work" ? "#E05A4A" : "#52C78E";
 
     const drawOverlay = () => {
+      _ctx.clearRect(0, 0, FAVICON_SIZE, FAVICON_SIZE);
       // Small dot in bottom-right corner
-      ctx.beginPath();
-      ctx.arc(size - 7, size - 7, 6, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.fill();
-      ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
+      _ctx.beginPath();
+      _ctx.arc(DOT_CENTER, DOT_CENTER, DOT_RADIUS, 0, Math.PI * 2);
+      _ctx.fillStyle = color;
+      _ctx.fill();
+      _ctx.strokeStyle = "#ffffff";
+      _ctx.lineWidth = DOT_STROKE_WIDTH;
+      _ctx.stroke();
 
-      setFaviconDataUrl(canvas.toDataURL("image/png"));
+      setFaviconDataUrl(_canvas.toDataURL("image/png"));
     };
 
+    const ALLOWED_SCHEMES = ["http:", "https:", "data:"];
     const src = originalHref || null;
     if (src) {
+      if (!ALLOWED_SCHEMES.some((s) => src.startsWith(s))) {
+        drawOverlay();
+        return;
+      }
       const img = new Image();
       img.crossOrigin = "anonymous";
       img.onload = () => {
         if (myGen !== gen) return;
         try {
-          ctx.drawImage(img, 0, 0, size, size);
+          _ctx.drawImage(img, 0, 0, FAVICON_SIZE, FAVICON_SIZE);
           drawOverlay();
-        } catch (_) {
+        } catch {
           // Canvas tainted by cross-origin image — just show dot
-          ctx.clearRect(0, 0, size, size);
+          _ctx.clearRect(0, 0, FAVICON_SIZE, FAVICON_SIZE);
           drawOverlay();
         }
       };
@@ -117,7 +128,6 @@ const faviconOverlay = (() => {
     ++gen;
     if (!linkEl || !originalHref) return;
     linkEl.href = originalHref;
-    originalHref = null;
   }
 
   return {
@@ -149,6 +159,7 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden || myTabId === null) return;
   browser.runtime.sendMessage({ type: "GET_STATE" }).then((state) => {
     applyState(state, myTabId);
+  // extension context unavailable (update in flight) — nothing to apply
   }).catch(() => {});
 });
 
@@ -156,7 +167,7 @@ document.addEventListener("visibilitychange", () => {
 
 browser.runtime.onMessage.addListener((msg) => {
   if (msg.type === "UPDATE_BAR") {
-    if (myTabId === null) { pendingMsg = msg; return; }
+    if (myTabId === null) { bufferedUpdate = msg; return; }
     applyState(msg.state, myTabId);
   }
 });
@@ -166,8 +177,9 @@ browser.runtime.onMessage.addListener((msg) => {
 browser.runtime.sendMessage({ type: "CONTENT_READY" }).then((response) => {
   myTabId = response.tabId;
   applyState(response.state, myTabId);
-  if (pendingMsg) {
-    applyState(pendingMsg.state, myTabId);
-    pendingMsg = null;
+  if (bufferedUpdate) {
+    applyState(bufferedUpdate.state, myTabId);
+    bufferedUpdate = null;
   }
+// background not yet ready; content script will re-init on next CONTENT_READY
 }).catch(() => {});
