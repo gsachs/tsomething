@@ -1,7 +1,7 @@
 # Pomo — Architectural Review Note
 
 **For:** Principal Lead Engineer / Architect
-**Project:** Pomo v1.0.0 — Firefox WebExtension Pomodoro Timer
+**Project:** Pomo v1.1.0 — Firefox WebExtension Pomodoro Timer
 **Date:** 2026-03-01
 **Status:** Awaiting installation approval
 
@@ -9,9 +9,9 @@
 
 ## 1. Executive Summary
 
-Pomo is a focused Pomodoro timer implemented as a Firefox Manifest V2 WebExtension. It injects a non-interactive progress bar into every HTTP/HTTPS page, overlays a status dot on the active tab's favicon, and provides a popup UI for session control and history. The extension has no network access, no external dependencies, no analytics, and no third-party code. All data stays in `browser.storage.local`.
+Pomo is a focused Pomodoro timer implemented as a Firefox Manifest V2 WebExtension. It injects a non-interactive progress bar into every HTTP/HTTPS page, overlays a status dot on each active tab's favicon, and provides a popup UI for session control and history. The extension has no network access, no external dependencies, no analytics, and no third-party code. All data stays in `browser.storage.local`.
 
-The codebase is small: three JS modules (~510, ~185, ~265 lines), two CSS files, one HTML file, and a manifest. It underwent two code-review rounds (multi-agent automated review + a gate-check agent) that produced 60 discrete findings. All 60 have been resolved. What follows is a precise account of what the extension does, the architectural choices made, where the bodies are buried, and what a reviewer needs to know before approving installation.
+The codebase is small: three JS modules (~628, ~185, ~250 lines), two CSS files, one HTML file, and a manifest. It underwent two code-review rounds (multi-agent automated review + a gate-check agent) that produced 60 discrete findings; all 60 were resolved. A subsequent feature addition (multi-timer pool) replaced the single global state singleton with a `Map<tabId, TimerInstance>` pool, enabling parallel independent timers across tabs. What follows is a precise account of what the extension does, the architectural choices made, where the bodies are buried, and what a reviewer needs to know before approving installation.
 
 ---
 
@@ -25,7 +25,9 @@ This extension was built from scratch in a single AI-assisted session using the 
 4. **Multi-agent code review (round 2):** Seven specialized agents ran in parallel — security-sentinel, performance-oracle, architecture-strategist, julik-frontend-races-reviewer (concurrency specialist), code-simplicity-reviewer, agent-native-reviewer, and learnings-researcher. Produced 31 findings across P1/P2/P3 severity tiers; all resolved.
 5. **Gate-check (round 3):** A post-commit `code-reviewer` agent ran a zero-tolerance check (null returns, swallowed exceptions, changelog comments, TODOs). Produced 12 advisory notes; 6 net-new, all resolved.
 
-The final resolved codebase is what this document describes. There is no git history (the repo was never initialized), so the resolution record lives in `todos/` (60 files, all marked `complete`).
+The final resolved codebase is what this document describes. The resolution record lives in `todos/` (60 files, all marked `complete`).
+
+6. **Multi-timer pool:** A subsequent feature replaced the single `state` singleton with `Map<tabId, TimerInstance>`. Each tab gets an independent timer instance; `pomodoroCount` is shared across all. Message routing in the background was updated to dispatch by `msg.tabId`; the popup was updated to resolve its tab ID on open. The bind-tab UI was removed (tab association is now implicit).
 
 ---
 
@@ -35,18 +37,20 @@ The final resolved codebase is what this document describes. There is no git his
 pomo/
 ├── manifest.json
 ├── background/
-│   └── background.js        # Timer state machine, IPC hub, persistence (~510 lines)
+│   └── background.js        # Timer pool, IPC hub, persistence (~628 lines)
 ├── content/
 │   ├── content.js           # Progress bar injection, favicon overlay (~185 lines)
 │   └── content.css          # Bar styles (injected alongside content.js)
 ├── popup/
 │   ├── popup.html           # Extension popup UI
-│   ├── popup.js             # Popup renderer and action dispatcher (~265 lines)
+│   ├── popup.js             # Popup renderer and action dispatcher (~250 lines)
 │   └── popup.css            # Popup styles
 ├── icons/
 │   └── icon.svg
 └── docs/
-    └── solutions/           # AI-generated architectural documentation
+    ├── brainstorms/         # Design exploration documents
+    ├── plans/               # Implementation plans
+    └── solutions/           # Architectural documentation and learned patterns
 ```
 
 ---
@@ -100,40 +104,55 @@ The extension has three runtime contexts. Communication is message-passing only 
 └───────────────────────┘    └─────────────────────────────────────┘
 ```
 
-### 5.1 Background — Timer State Machine
+### 5.1 Background — Timer Pool
 
-**State object:**
+**TimerInstance (per-tab object):**
 ```js
+// Created by createTimerInstance(tabId)
 {
-  mode: "idle" | "work" | "break" | "longBreak",
-  boundTabId: null | integer,
-  startTimestamp: null | ms-epoch,   // wall clock of current running period start
-  elapsedMs: number,                 // accumulated across auto-pauses
+  tabId:           integer,
+  mode:            "idle" | "work" | "break" | "longBreak",
+  startTimestamp:  null | ms-epoch,   // wall clock of current running period start
+  elapsedMs:       number,            // accumulated across auto-pauses
   sessionDuration: null | ms,
-  autoPaused: boolean,
-  pomodoroCount: integer,            // resets after longBreak
-  sessionStart: null | ms-epoch,     // immutable through the session; used for history
-  sessionDomain: null | string,      // hostname of bound tab
+  autoPaused:      boolean,
+  sessionStart:    null | ms-epoch,   // immutable through the session; used for history
+  sessionDomain:   null | string,     // hostname snapshotted at session start
+  tickInterval:    null | handle,     // live setInterval — excluded from persistence
 }
 ```
 
-**Elapsed time model:** The extension uses a `startTimestamp`-anchor design rather than a running counter. `currentElapsed()` is always `Date.now() - state.startTimestamp`. On auto-pause, the current elapsed is snapshotted into `state.elapsedMs` and `startTimestamp` is set to null-equivalent. On resume, `startTimestamp` is re-anchored as `Date.now() - state.elapsedMs`. This approach is crash-resilient: a background restart can reconstruct true elapsed time from the persisted `startTimestamp`.
+**Pool:**
+```js
+const timers = new Map(); // Map<tabId, TimerInstance>
+```
 
-**Mode transitions:**
+**Shared module-level state** (not per-instance):
+```js
+let pomodoroCount = 0;          // shared across all instances; completing any session increments
+let settings      = { ... };   // all instances share one settings object
+let _historyChain = Promise.resolve(); // serializes concurrent appendToHistory calls
+```
+
+**Elapsed time model:** Each instance uses a `startTimestamp`-anchor design. `currentElapsed(inst)` is always `Date.now() - inst.startTimestamp`. On auto-pause, elapsed is snapshotted into `inst.elapsedMs`. On resume, `startTimestamp` re-anchors as `Date.now() - inst.elapsedMs`. This is crash-resilient: a background restart reconstructs elapsed from the persisted `startTimestamp`.
+
+**Mode transitions (per instance):**
 ```
 idle ──START──► work ──complete──► break (or longBreak every N pomos)
-                     ──STOP───►  idle
-break ──complete──► idle
-      ──SKIP_BREAK──► idle
-longBreak ──complete──► idle (resets pomodoroCount)
-          ──SKIP_BREAK──► idle
+                     ──STOP───►  idle (instance removed from pool)
+break ──complete──► idle (instance removed)
+      ──SKIP_BREAK──► idle (instance removed)
+longBreak ──complete──► idle (instance removed; pomodoroCount resets)
+          ──SKIP_BREAK──► idle (instance removed)
 ```
 
-**Persistence strategy:** `safePersist()` (which wraps `persistState()` with a `console.error` catch) is called on every state transition — `startSession`, `resetToIdle`, `bindToCurrentTab`, `unbindTab`, and pause/resume. It is explicitly NOT called on every tick to avoid 1 Hz storage writes. The storage entry is a flat spread of `state`: `{ timerState: { ...state } }`.
+**Persistence strategy:** `safePersist()` wraps `persistState()` with a `console.error` catch. It is called on every state transition — start, stop, skip, pause/resume, tab close. It is explicitly NOT called on every tick. Storage serializes the entire pool: `{ timerStates: { [tabId]: snapshot }, pomodoroCount }`.
 
-**Crash recovery:** `init()` reads `timerState` from storage. If a session was running when the background page died (possible in MV2 if memory pressure causes suspension, though unlikely with `persistent: true`), `deserializeState` re-anchors elapsed time. If the session has already exceeded its duration offline, `onSessionComplete()` is triggered synchronously before messaging begins.
+**Crash recovery:** `init()` reads `timerStates` from storage. For each entry, it verifies the tab still exists via `browser.tabs.get`; tabs that no longer exist are silently discarded. Surviving instances are deserialized via `deserializeInstance(snap, inst)`, which re-anchors elapsed. If a session completed offline, `onSessionComplete(inst)` fires before messaging begins.
 
-**`persistent: true` is load-bearing.** Removing it would destroy the `setInterval` handle and all in-memory state on suspension. A `browser.alarms`-based approach would be required for MV3 compatibility. This is documented in the file header and is not a defect — it is an explicit architectural commitment.
+**Schema migration:** The old single-timer key `timerState` (singular) is detected on startup and migrated: `pomodoroCount` is extracted, the old key is removed, and the new `timerStates` (plural map) schema takes effect from that point.
+
+**`persistent: true` is load-bearing.** Each `TimerInstance` holds a live `setInterval` handle. Removing `persistent: true` would destroy all handles on suspension. A `browser.alarms`-based approach would be required for MV3. This is documented in the file header — it is an explicit architectural commitment.
 
 ### 5.2 Content Script — Bar and Favicon
 
@@ -153,6 +172,8 @@ The content script has two responsibilities handled independently:
 
 The popup is a pure renderer. It maintains no timer state of its own — all state comes from `GET_STATE` on open and `STATE_UPDATE` pushes during operation.
 
+**Tab identification:** The popup is an extension page, not a tab, so `sender.tab.id` is unavailable on the background side. On open, the popup calls `browser.tabs.query({ active: true, currentWindow: true })` to resolve `currentTabId`. All outgoing action messages (`START`, `STOP`, `SKIP_BREAK`, `GET_STATE`) include `tabId: currentTabId`. `STATE_UPDATE` pushes from the background include `tabId`; the popup ignores updates where `msg.tabId !== currentTabId` so it only renders the timer for the tab it is currently showing.
+
 **Rendering:** `renderTimerState(state)` renders mode label, countdown (using `msToMinSecCeil` so it never shows `00:00` one second early), progress bar fill, dot indicators (dynamically generated from `settings.longBreakInterval`), pause notice, and button visibility.
 
 **Settings:** Loaded once on popup open via `GET_STATE`. Not reloaded on `STATE_UPDATE` ticks, which prevents overwriting a user's in-progress input in the settings form. After a successful `SAVE_SETTINGS`, the background returns the sanitized values in the reply (`{ ok: true, settings: {...} }`) — the popup could refresh the form from this, though the current implementation shows only a "Saved!" notice.
@@ -169,18 +190,18 @@ All communication is `browser.runtime.sendMessage` / `browser.tabs.sendMessage`.
 
 | Message | Sender | Handler | Reply |
 |---|---|---|---|
-| `CONTENT_READY` | content → background | Returns `{ tabId, state }` | Always |
-| `GET_STATE` | popup → background | Returns `publicState()` | Always |
-| `START { mode? }` | popup → background | `startSession(mode \|\| "work")` | `{ ok: true }` |
-| `STOP` | popup → background | `stopSession()` | `{ ok: true }` or `{ ok: false, reason: "not running" }` |
-| `SKIP_BREAK` | popup → background | `skipBreak()` | `{ ok: true }` or `{ ok: false, reason: "not in break" }` |
-| `BIND_TAB { tabId? }` | popup → background | Bind to `msg.tabId` or active tab | `{ ok: true }` |
-| `UNBIND_TAB` | popup → background | `unbindTab()` | `{ ok: true }` |
-| `GET_HISTORY` | popup → background | Returns filtered history | Array of entries |
+| `CONTENT_READY` | content → background | Returns `{ tabId, state }` for `sender.tab.id` | Always |
+| `GET_STATE { tabId }` | popup → background | Returns instance state for `tabId`, or idle state if no instance | Always |
+| `START { tabId, mode? }` | popup → background | Creates/reuses instance; `startSession(inst, mode \|\| "work")` | `{ ok: true }` |
+| `STOP { tabId }` | popup → background | `stopSession(inst)`; removes instance | `{ ok: true }` or `{ ok: false, reason: "not running" }` |
+| `SKIP_BREAK { tabId }` | popup → background | `skipBreak(inst)`; removes instance | `{ ok: true }` or `{ ok: false, reason: "not in break" }` |
+| `BIND_TAB { tabId, fromTabId? }` | agent → background | Creates/moves instance to `tabId` | `{ ok: true }` |
+| `UNBIND_TAB { tabId }` | agent → background | Finalizes and removes instance for `tabId` | `{ ok: true }` |
+| `GET_HISTORY` | popup → background | Returns filtered history (work only) | Array of entries |
 | `SAVE_SETTINGS { settings }` | popup → background | `sanitizeSettings()` + persist | `{ ok: true, settings }` |
 | `CLEAR_HISTORY` | popup → background | Clears storage | `{ ok: true }` |
-| `STATE_UPDATE { state }` | background → popup | `renderTimerState()` | None |
-| `UPDATE_BAR { state, isBoundTab }` | background → content | `applyState()` | None |
+| `STATE_UPDATE { tabId, state }` | background → popup | `renderTimerState()` if `tabId === currentTabId` | None |
+| `UPDATE_BAR { state }` | background → content | `applyState()` | None |
 
 **Security:** The message handler opens with `if (sender.id && sender.id !== browser.runtime.id) return false;` — cross-extension messages are rejected. The `initialized` flag gates all non-essential messages until `init()` completes.
 
@@ -194,8 +215,8 @@ Four `.catch(() => {})` blocks on `sendMessage` calls are intentionally empty. E
 
 | Location | Reason |
 |---|---|
-| `broadcastState` → `tabs.sendMessage` to bound tab | Content script absent on restricted pages (`about:`, `moz-extension:`, PDF viewer) or tab closed |
-| `broadcastState` → `runtime.sendMessage` to popup | Popup is closed; rejection is normal — no listener registered |
+| `broadcastState` → `tabs.sendMessage(inst.tabId, ...)` | Content script absent on restricted pages (`about:`, `moz-extension:`, PDF viewer) or tab closed |
+| `broadcastState` → `runtime.sendMessage(STATE_UPDATE, ...)` | Popup is closed; rejection is normal — no listener registered |
 | `visibilitychange` → `GET_STATE` | Extension context unavailable during update/restart |
 | `CONTENT_READY` send | Background not yet ready; script will re-init on next load |
 
@@ -207,15 +228,24 @@ These are not swallowed errors; they are expected rejection modes with no recove
 
 ### 7.1 Storage Schema
 
-`browser.storage.local` holds three keys:
+`browser.storage.local` holds four keys:
 
-**`timerState`** — flat spread of `state`:
+**`timerStates`** — map of all active instances, keyed by tab ID (string):
 ```js
 {
-  mode, boundTabId, startTimestamp, elapsedMs,
-  sessionDuration, autoPaused, pomodoroCount,
-  sessionStart, sessionDomain
+  "42": {
+    tabId, mode, startTimestamp, elapsedMs,
+    sessionDuration, autoPaused,
+    sessionStart, sessionDomain
+    // tickInterval excluded — live handle, not serializable
+  },
+  "57": { ... }
 }
+```
+
+**`pomodoroCount`** — shared integer across all instances:
+```js
+6
 ```
 
 **`settings`**:
@@ -251,7 +281,7 @@ Settings are sanitized at two points:
 1. **On receive:** `SAVE_SETTINGS` destructures only known keys before calling `sanitizeSettings()` — prototype pollution via unexpected keys is impossible.
 2. **On persist/restore:** `sanitizeSettings` clamps and type-coerces all five fields. Stored values are merged with `DEFAULT_SETTINGS` before sanitizing on startup, so a partial or corrupt settings blob degrades gracefully to defaults.
 
-Stored timer state is similarly validated by `validateStoredState()` before `Object.assign` in `deserializeState`. Mode is whitelisted, numerics are bounds-checked, `boundTabId` is validated as integer-or-null.
+Stored timer state is similarly validated by `validateStoredState()` before `Object.assign` in `deserializeInstance`. Mode is whitelisted; numerics are bounds-checked. `boundTabId` no longer exists — each instance is implicitly bound to its `tabId`.
 
 ---
 
@@ -307,28 +337,28 @@ img.onload = () => {
 
 ### 8.4 `startSession` Async Domain Resolution
 
-`startSession` is `async`. It awaits `browser.tabs.get(state.boundTabId)` to resolve the hostname before calling `broadcastState()`. This ensures the first `STATE_UPDATE` and the first persisted snapshot carry the correct `sessionDomain`. The `try/catch` falls back to `null` if the tab cannot be resolved.
+`startSession(inst, mode)` is `async`. It awaits `browser.tabs.get(inst.tabId)` to resolve the hostname before calling `broadcastState(inst)`. This ensures the first `STATE_UPDATE` and persisted snapshot carry the correct `sessionDomain`. The `try/catch` falls back to `null` if the tab cannot be resolved.
 
-**Caveat:** Because `startSession` is now `async`, callers that depended on synchronous completion (e.g., `onSessionComplete` calling `startSession("break")` immediately) now run the next line before the domain is resolved. In practice `onSessionComplete` does nothing after calling `startSession` for breaks, so this is fine — but any future caller that chains logic after `startSession` must `await` it.
+`onSessionComplete(inst)` is also `async` and `await`s `startSession(inst, nextBreak)` for the break — this ensures the break session's domain is fully resolved before any further state reads.
 
 ### 8.5 logSession Snapshot Pattern
 
-`logSession` is `async` (it awaits `appendToHistory`). Before any `await`, it captures an immutable snapshot of the mutable `state` object:
+`logSession(inst, completed, pctComplete)` is `async` (it awaits `appendToHistory`). Before any `await`, it captures an immutable snapshot of the mutable instance:
 
 ```js
-async function logSession(completed, pctComplete) {
+async function logSession(inst, completed, pctComplete) {
   const snapshot = {
-    mode: state.mode,
-    domain: state.sessionDomain,
-    startTime: state.sessionStart,
-    elapsed: Math.round(currentElapsed()),
+    mode:      inst.mode,
+    domain:    inst.sessionDomain,
+    startTime: inst.sessionStart,
+    elapsed:   Math.round(currentElapsed(inst)),
   };
   if (snapshot.mode === "idle") return;
   // ...
 }
 ```
 
-Without this snapshot, `state` could be mutated by a new `startSession` before `appendToHistory` resolves, logging the wrong domain or mode.
+Without this snapshot, `inst` could be mutated by a new `startSession` (break auto-start) before `appendToHistory` resolves, logging the wrong domain or mode.
 
 ---
 
@@ -354,13 +384,14 @@ The extension has read access to tab IDs and URLs (`tabs` permission). It does n
 
 | Concern | Design |
 |---|---|
-| Storage write frequency | One write per state transition (start, stop, pause, resume, bind). Zero writes per tick. |
-| Badge update frequency | Only when the label changes (~once per minute in work mode). Guarded by `_lastBadgeText` cache. |
+| Storage write frequency | One write per state transition (start, stop, pause, resume, tab close). Zero writes per tick. |
+| Badge update frequency | Only when the label changes (~once per minute in work mode). Guarded by `_lastBadgeText` cache. Badge color updated on each `updateBadge` call since focused-tab mode can differ across instances. |
 | DOM queries in popup | All element references cached at module scope. `elDotsContainer` cached alongside other `el*` refs. |
 | Canvas allocation | One canvas allocated per page load, reused across all `faviconOverlay.apply()` calls. |
 | History pruning | O(n) filter runs once at startup in `init()`, not on every write. |
 | `sendMessage` error paths | All fire-and-forget sends have `.catch(() => {})`. No unhandled rejections in the hot path. |
-| `setInterval` at 1 Hz | Standard for a countdown timer. Idle sessions do no work (early return in `tick()`). |
+| `setInterval` per instance at 1 Hz | Each active `TimerInstance` has its own handle. Idle instances have no interval. N parallel timers = N intervals, all firing once/second. Browser timer coalescing applies. |
+| Pool iteration in `checkBoundTabActivity` | O(N) over all instances per focus event; N is bounded by open tabs. One `tabs.query` for the entire pool per check. |
 
 ---
 
@@ -376,7 +407,7 @@ The extension has read access to tab IDs and URLs (`tabs` permission). It does n
 
 **No undo for CLEAR_HISTORY:** `CLEAR_HISTORY` replaces the full history array with `[]` and replies `{ ok: true }`. There is no confirmation, no soft-delete, no recovery. This is intentional — the feature set is minimal.
 
-**Single-window assumption in auto-pause:** `checkBoundTabActivity` queries `lastFocusedWindow: true`. If a user works across multiple windows with the bound tab in a non-focused window, the timer will auto-pause. This is arguably correct behavior (the tab is not active), but users with multi-window workflows may find it surprising.
+**Auto-pause with multiple timers:** `checkBoundTabActivity` queries `lastFocusedWindow: true` and pauses all non-focused-tab instances. With multiple timers running, only the currently-focused tab's timer ticks; all others are paused. This is intentional — a user can only actively work on one tab at a time — but may surprise users who expect parallel progress across tabs.
 
 ---
 
@@ -399,8 +430,8 @@ Before approving installation, a reviewer should verify:
 - [ ] **CSP is restrictive.** `script-src 'self'; object-src 'self'; style-src 'self'` — no remote sources, no unsafe-inline.
 - [ ] **No network access.** Grep for `fetch`, `XMLHttpRequest`, `WebSocket`, `navigator.sendBeacon` — none present.
 - [ ] **Content script injection scope.** `http://*/*` and `https://*/*` in `content_scripts.matches` means the bar appears on every page. This is the intended behavior. Confirm acceptable for the deployment context.
-- [ ] **Data stored.** `browser.storage.local` only. Holds: timer state (mode, timestamps, paused flag, bound tab ID, pomo count), settings (5 fields), session history (domain, timestamps, elapsed, completion status). No passwords, no page content, no full URLs.
-- [ ] **`persistent: true`.** Required for the `setInterval`-based timer. Accepted cost: the background page remains resident in memory for the extension lifetime. Memory footprint is minimal (no large data structures; the single `setInterval` fires 1 Hz).
+- [ ] **Data stored.** `browser.storage.local` only. Holds: `timerStates` (map of per-tab snapshots: mode, timestamps, paused flag), `pomodoroCount` (shared integer), `settings` (5 fields), `history` (domain, timestamps, elapsed, completion status). No passwords, no page content, no full URLs. No `boundTabId` — tab association is implicit via map key.
+- [ ] **`persistent: true`.** Required for `setInterval`-based timers. Accepted cost: background page remains resident for the extension lifetime. Memory footprint is minimal; each active tab adds one `TimerInstance` (~10 fields) and one 1 Hz interval.
 - [ ] **Content script DOM impact.** Appends one `<div>` to `<body>` and one `<link>` to `<head>` (favicon only, only on bound tab). All elements are prefixed `pomo-`. `pointer-events: none` prevents interaction capture. No page content is read or modified.
 - [ ] **No eval, no dynamic script loading, no remote assets.**
 
@@ -416,4 +447,4 @@ The primary ongoing risk is the `persistent: true` background page model — it 
 
 ---
 
-*Prepared from source audit of the final resolved codebase. All 60 review findings (todos 001–060) are marked complete. No pending issues at time of writing.*
+*Prepared from source audit of the final resolved codebase. All 60 review findings (todos 001–060) are marked complete. The multi-timer pool feature (v1.1.0) was subsequently implemented and merged; this document reflects the post-merge state.*

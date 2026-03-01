@@ -9,9 +9,9 @@ A focused Pomodoro timer for Firefox. No accounts, no cloud, no distractions.
 
 ## Features
 
-- **Global or tab-bound timer** — runs freely across all tabs, or locks to a specific tab and pauses automatically when you switch away or lose window focus
+- **Per-tab parallel timers** — run independent Pomodoro sessions on multiple tabs simultaneously; each tab gets its own timer, progress bar, and countdown; timers auto-pause when their tab is not focused
 - **Injected progress bar** — a thin bar at the top of every page shows elapsed time; color-coded red for work, green for breaks; grows slightly in fullscreen
-- **Favicon overlay** — a colored dot composited onto the bound tab's favicon for at-a-glance status without opening anything
+- **Favicon overlay** — a colored dot composited onto each active tab's favicon for at-a-glance status without opening anything
 - **Classic Pomodoro cycle** — 25 min work → 5 min break → repeat × 4 → 15 min long break; all durations configurable
 - **System notifications + toolbar badge** — alerts when a session ends even if the browser is in the background; badge shows remaining minutes
 - **Activity history** — 7-day rolling log of work sessions grouped by date, domain, and completion status
@@ -42,19 +42,17 @@ Click the toolbar icon to open the popup.
 
 | State | Available actions |
 |---|---|
-| Idle | Start, Bind to tab |
+| Idle | Start |
 | Work | Stop |
 | Break / Long break | Skip break |
 
-**Start** begins a 25-minute work session. When it ends, a short break starts automatically. After the break you click **Start** again for the next round. After 4 rounds a long break is offered.
+**Start** begins a 25-minute work session on the current tab. When it ends, a short break starts automatically on the same tab. After the break you click **Start** again for the next round. After 4 rounds a long break is offered.
 
 **Stop** abandons the current session. If you were at least 80% through, it still counts toward your daily tally.
 
-### Binding to a tab
+The popup always shows the timer for the tab you're currently on. To start a second parallel timer, switch to another tab and click **Start** there. Both timers run independently; switching tabs pauses the one you leave and resumes the one you return to.
 
-Click **Bind to tab** while idle. The timer will only tick while that tab is selected *and* the browser window has OS focus. Switching to another tab or application pauses it silently. The bound tab gets a colored favicon dot so you can see its status at a glance.
-
-Closing the bound tab ends the session.
+Closing a tab ends its timer session.
 
 ### History tab
 
@@ -75,26 +73,28 @@ Shows completed and abandoned work sessions for the past 7 days, grouped by date
 ## How it works
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  background.js  (persistent background page)        │
-│  - Timer state machine (idle/work/break/longBreak)  │
-│  - Tab focus tracking & auto-pause                  │
-│  - History logging (7-day rolling, domain-only)     │
-│  - Pushes state to bound tab + popup                │
-└──────────┬───────────────────────┬──────────────────┘
-           │ UPDATE_BAR            │ STATE_UPDATE
-           ▼                       ▼
-┌──────────────────────┐  ┌────────────────────────────┐
-│  content.js          │  │  popup.js                  │
-│  - Injected bar      │  │  - Timer / History /       │
-│  - Favicon overlay   │  │    Settings tabs           │
-│  - Fullscreen aware  │  │  - Renders pushed state    │
-│  - visibilitychange  │  │  - Dispatches user actions │
-│    sync pull         │  └────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  background.js  (persistent background page)                 │
+│  - Timer pool: Map<tabId, TimerInstance>                     │
+│  - Each instance: own mode, elapsed, setInterval tick        │
+│  - Shared: pomodoroCount, settings, history chain            │
+│  - Tab focus tracking & per-instance auto-pause              │
+│  - History logging (7-day rolling, domain-only)              │
+│  - Pushes state to each tab's content script + popup         │
+└──────┬────────────────────────────────────────┬──────────────┘
+       │ UPDATE_BAR (to tab's content script)   │ STATE_UPDATE {tabId}
+       ▼                                         ▼
+┌──────────────────────┐  ┌────────────────────────────────────┐
+│  content.js          │  │  popup.js                          │
+│  - Injected bar      │  │  - Resolves active tabId on open   │
+│  - Favicon overlay   │  │  - Renders only its tab's timer    │
+│  - Fullscreen aware  │  │  - Filters STATE_UPDATE by tabId   │
+│  - visibilitychange  │  │  - Timer / History / Settings tabs │
+│    sync pull         │  └────────────────────────────────────┘
 └──────────────────────┘
 ```
 
-The background script is the single source of truth. Content scripts receive pushes on state changes and pull once on `visibilitychange` when a tab comes back into view. The popup guards against double-renders by suppressing `STATE_UPDATE` messages until the initial `GET_STATE` fetch resolves.
+The background script maintains a pool of `TimerInstance` objects keyed by tab ID. Each instance runs its own 1 Hz `setInterval`. The popup resolves the currently-active tab's ID on open, sends it with every action message, and ignores `STATE_UPDATE` pushes for other tabs.
 
 ### Timer accuracy
 

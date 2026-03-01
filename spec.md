@@ -30,31 +30,38 @@ A focused Pomodoro timer for Firefox. Minimal surface, no accounts, no cloud.
 
 ---
 
-## Tab binding
+## Per-tab parallel timers
 
-**Default mode:** timer runs globally, not tied to any tab or window.
+**Model:** each tab gets its own independent timer instance. Multiple tabs can run simultaneously.
 
-**Binding**
-- User clicks "Bind to current tab" in the popup
-- Only one tab can be bound at a time
-- While bound, the timer ticks only when both conditions hold:
-  1. The bound tab is the active (selected) tab
+**Starting a timer**
+- Opening the popup on any tab and clicking Start creates a timer for that tab
+- Timers are keyed by tab ID; navigating within the same tab does not destroy its timer
+- Session domain is snapshotted at session start (hostname only)
+
+**Auto-pause**
+- Only the currently focused tab's timer ticks
+- Switching to another tab auto-pauses the previous tab's timer silently (no user action needed)
+- Both conditions must hold for a timer to tick:
+  1. Its tab is the active (selected) tab in the window
   2. The browser window has OS-level focus
-- If either condition fails, the timer auto-pauses silently (no user action needed)
 
 **Internal Firefox pages** (`about:newtab`, `about:blank`, browser settings)
-- Content scripts cannot inject into these pages
-- Treated as inactive: timer auto-pauses while on an internal page in bound mode
+- Content scripts cannot inject into these pages; no progress bar appears
+- Timer on that tab still ticks (it is a tab, just without visual feedback)
 
-**Bound tab closed**
+**Tab closed mid-session**
 - Session is abandoned immediately
-- Binding dissolves; timer returns to idle
-- If ≥ 80% was elapsed, the session counts toward the cycle
+- Timer instance is removed from the pool
+- If ≥ 80% was elapsed, the session counts toward the shared cycle counter
 
-**Bound tab indicator**
-- A small colored dot is composited onto the tab's favicon via canvas
+**Favicon indicator**
+- A small colored dot is composited onto each active tab's favicon via canvas
 - Color matches session type (red = work, green = break)
-- Restored to original favicon on unbind or session end
+- Restored to original favicon when the session ends or the tab is closed
+
+**Shared counter**
+- `pomodoroCount` is shared across all instances; completing a work session on any tab increments it
 
 ---
 
@@ -115,10 +122,11 @@ Three tabs: **Timer · History · Settings**
 - Large countdown display (MM:SS)
 - Thin progress bar
 - "Paused (tab inactive)" notice when auto-paused
-- **Idle:** Start button
-- **Work:** Stop button (abandons session)
-- **Break / Long break:** Skip break button
-- Bind to tab / Unbind tab toggle with bound status label
+- **Idle:** Start button (creates a new timer instance for this tab)
+- **Work:** Stop button (abandons session, removes instance)
+- **Break / Long break:** Skip break button (removes instance, tab returns to idle)
+
+The popup always shows the timer for the tab it is currently open on. Switching to a different tab and opening the popup shows that tab's independent timer (or idle state if none).
 
 ### History tab
 - Scrollable list grouped by date
@@ -143,7 +151,7 @@ Three tabs: **Timer · History · Settings**
 | Background | Persistent background page (`"persistent": true`) |
 | Timer accuracy | `setInterval` (1 s tick) + timestamp-based elapsed to survive tab switches and restarts |
 | Content script injection | `http://*/*`, `https://*/*`, top frame only, `document_end` |
-| Bar updates | Content script polls background every 1 s when tab is visible (`document.hidden` check); background also pushes on state changes |
+| Bar updates | Background pushes `UPDATE_BAR` to each tab's content script on every tick; content script pulls once on `visibilitychange` |
 | Favicon overlay | Canvas compositing; CORS-safe (falls back to dot-only if origin blocks cross-origin image load) |
-| Storage | `browser.storage.local` for settings, timer state, and history |
+| Storage | `browser.storage.local` for settings, all timer instances (`timerStates` map), and history |
 | Sync | None — local machine only |

@@ -236,15 +236,13 @@ function tick() {
   }
 }
 
-// broadcastState: targeted, not broadcast
-function broadcastState() {
-  const ps = publicState();
-  if (state.boundTabId !== null) {
-    browser.tabs.sendMessage(state.boundTabId, {
-      type: "UPDATE_BAR", ...ps, isBoundTab: true,
-    }).catch(() => {});
-  }
-  browser.runtime.sendMessage({ type: "STATE_UPDATE", state: ps }).catch(() => {});
+// broadcastState: targeted per instance, not broadcast to all tabs
+function broadcastState(inst) {
+  const ps = publicState(inst);
+  browser.tabs.sendMessage(inst.tabId, {
+    type: "UPDATE_BAR", state: ps,
+  }).catch(() => {});
+  browser.runtime.sendMessage({ type: "STATE_UPDATE", tabId: inst.tabId, state: ps }).catch(() => {});
 }
 ```
 
@@ -440,25 +438,31 @@ domain.textContent = e.domain || "unbound";
 - [ ] All settings paths call `sanitizeSettings()` before assignment
 - [ ] All async functions that touch shared state snapshot first
 - [ ] Tick/render handlers are free of I/O
-- [ ] `broadcastState()` sends to a specific tab, not all tabs
+- [ ] `broadcastState(inst)` sends to `inst.tabId`, not all tabs
 - [ ] Paired event listeners share a debounce
 - [ ] `pomodoroCount` is incremented in exactly one place
 - [ ] History rendering uses `textContent`, not `innerHTML`
 - [ ] Canvas `drawImage` is wrapped in try/catch
 - [ ] `initialized` flag guards messages before `init()` completes
+- [ ] Message handler routes by `msg.tabId`; `GET_STATE` uses read-only `timers.get()` (never `resolveInstance`) to avoid creating ghost instances
+- [ ] Popup resolves `currentTabId` via `tabs.query` before first `GET_STATE` and passes it in every outgoing message
+- [ ] `STATE_UPDATE` listener in popup filters by `msg.tabId === currentTabId`
 
 ### Test scenarios
 
 1. Start work session → immediately close browser → reopen: timer should resume from correct elapsed time.
-2. Bind tab → switch to another tab: timer should pause immediately.
-3. Bind tab → switch away → switch back within 50 ms: only one `persistState` call fired.
-4. Complete 4 pomodoros: `pomodoroCount` should reach 4 exactly once before reset (not 5 or 8).
+2. Start timer on tab A → switch to tab B: timer A should auto-pause; switching back should resume.
+3. Switch tabs rapidly (< 50 ms): only one `persistState` call fired due to debounce + generation counter.
+4. Complete 4 pomodoros across multiple tabs: `pomodoroCount` should reach 4 exactly once before reset (not 5 or 8).
 5. Stop session at 90% through: session should be counted; count should increment by 1.
 6. Send `SAVE_SETTINGS` with `workDuration: 999` and a rogue `__proto__` key: clamped to 120; rogue key discarded.
 7. Send a message from a fake extension ID: message silently rejected.
-8. Bind to a tab with a favicon from a cross-origin CDN: overlay renders (dot-only fallback, no crash).
+8. Tab with a favicon from a cross-origin CDN: overlay renders (dot-only fallback, no crash).
 9. Open popup while `init()` is still awaiting storage: non-GET_STATE messages return `{ error: "not ready" }`.
-10. Tab closes while bound and session is at 60%: session is recorded as abandoned (not counted); `pomodoroCount` unchanged.
+10. Tab closes mid-session at 60%: session is recorded as abandoned (not counted); `pomodoroCount` unchanged; instance removed from pool.
+11. Start timers on tabs A and B simultaneously → tab A completes: tab A enters break; tab B continues work; `pomodoroCount` increments by 1; history has one new entry.
+12. Send `GET_STATE` without `tabId`: background returns `idlePublicState()` (no ghost instance created).
+13. Open popup on tab with no timer: sees idle state; clicks Start → new instance created for that tab only.
 
 ---
 
