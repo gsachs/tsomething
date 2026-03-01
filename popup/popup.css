@@ -180,37 +180,6 @@ body {
 
 .hidden { display: none !important; }
 
-/* Bind row */
-.bind-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.btn-bind {
-  background: none;
-  border: 1px solid var(--border);
-  color: var(--muted);
-  font-size: 11px;
-  padding: 5px 10px;
-  border-radius: 5px;
-  cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
-  white-space: nowrap;
-}
-
-.btn-bind:hover { color: var(--text); border-color: var(--muted); }
-.btn-bind.bound { border-color: var(--accent); color: var(--accent); }
-#btn-bind:disabled { opacity: 0.4; cursor: default; }
-
-.bind-status {
-  font-size: 11px;
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-}
 
 /* ── History panel ───────────────────────────────────────────────────────── */
 
