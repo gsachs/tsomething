@@ -2,15 +2,14 @@
 
 // ─── Tab switching ────────────────────────────────────────────────────────────
 
-document.querySelectorAll(".tab-btn").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
-    document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
-    btn.classList.add("active");
-    document.getElementById(`tab-${btn.dataset.tab}`).classList.add("active");
-
-    if (btn.dataset.tab === "history") loadHistory();
-  });
+document.querySelector(".tabs").addEventListener("click", (e) => {
+  const btn = e.target.closest(".tab-btn");
+  if (!btn) return;
+  document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+  document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
+  btn.classList.add("active");
+  document.getElementById(`tab-${btn.dataset.tab}`).classList.add("active");
+  if (btn.dataset.tab === "history") loadHistory();
 });
 
 // ─── Timer tab ────────────────────────────────────────────────────────────────
@@ -26,12 +25,13 @@ const elSkip      = document.getElementById("btn-skip");
 const elBind      = document.getElementById("btn-bind");
 const elBindStatus = document.getElementById("bind-status");
 
-let currentBoundTabId = null;
+function msToMinSec(ms, round) {
+  const s = round ? Math.round(ms / 1000) : Math.ceil(ms / 1000);
+  return [Math.floor(s / 60), s % 60];
+}
 
 function formatTime(ms) {
-  const totalSec = Math.ceil(ms / 1000);
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
+  const [m, s] = msToMinSec(ms, false);
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
@@ -44,8 +44,6 @@ const MODE_LABEL = {
 
 function renderTimerState(state) {
   const { mode, progress, remaining, autoPaused, pomodoroCount, boundTabId, settings } = state;
-
-  currentBoundTabId = boundTabId;
 
   // Session label
   elLabel.textContent = MODE_LABEL[mode] || "IDLE";
@@ -92,8 +90,12 @@ function renderTimerState(state) {
 
   // Bind button
   const bound = boundTabId !== null;
+  const sessionActive = mode !== "idle";
   elBind.textContent = bound ? "Unbind tab" : "Bind to tab";
   elBind.classList.toggle("bound", bound);
+  elBind.disabled = sessionActive;
+  elBind.style.opacity = sessionActive ? "0.4" : "";
+  elBind.style.cursor = sessionActive ? "default" : "";
   elBindStatus.textContent = bound ? "tab-bound timer" : "";
 }
 
@@ -110,11 +112,8 @@ elSkip.addEventListener("click", () => {
 });
 
 elBind.addEventListener("click", () => {
-  if (currentBoundTabId !== null) {
-    browser.runtime.sendMessage({ type: "UNBIND_TAB" });
-  } else {
-    browser.runtime.sendMessage({ type: "BIND_TAB" });
-  }
+  const type = elBind.classList.contains("bound") ? "UNBIND_TAB" : "BIND_TAB";
+  browser.runtime.sendMessage({ type });
 });
 
 // ─── History tab ──────────────────────────────────────────────────────────────
@@ -122,10 +121,8 @@ elBind.addEventListener("click", () => {
 const elHistoryList = document.getElementById("history-list");
 
 function fmtDuration(ms) {
-  const s = Math.round(ms / 1000);
-  const m = Math.floor(s / 60);
-  const sec = s % 60;
-  return `${m}:${String(sec).padStart(2, "0")}`;
+  const [m, s] = msToMinSec(ms, true);
+  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 function fmtTime(ts) {
@@ -145,7 +142,7 @@ function dayKey(ts) {
 
 function loadHistory() {
   browser.runtime.sendMessage({ type: "GET_HISTORY" }).then((history) => {
-    elHistoryList.innerHTML = "";
+    elHistoryList.replaceChildren();
 
     // Only show work sessions
     const workSessions = history
@@ -153,7 +150,10 @@ function loadHistory() {
       .sort((a, b) => b.startTime - a.startTime);
 
     if (!workSessions.length) {
-      elHistoryList.innerHTML = '<div class="empty-state">No sessions yet</div>';
+      const empty = document.createElement("div");
+      empty.className = "empty-state";
+      empty.textContent = "No sessions yet";
+      elHistoryList.appendChild(empty);
       return;
     }
 
@@ -230,14 +230,18 @@ document.getElementById("settings-form").addEventListener("submit", (e) => {
 
 // ─── State sync ───────────────────────────────────────────────────────────────
 
+let popupReady = false;
+
 browser.runtime.onMessage.addListener((msg) => {
-  if (msg.type === "STATE_UPDATE") {
+  if (msg.type === "STATE_UPDATE" && popupReady) {
     renderTimerState(msg.state);
+    loadSettings(msg.state.settings);
   }
 });
 
 // Fetch initial state on popup open
 browser.runtime.sendMessage({ type: "GET_STATE" }).then((state) => {
+  popupReady = true;
   renderTimerState(state);
   loadSettings(state.settings);
 });

@@ -5,7 +5,8 @@ let isBound = false;
 let originalFaviconHref = null;
 let faviconLinkEl = null;
 let lastMode = null;
-let lastIsBound = false;
+let _faviconGen = 0;
+let pendingMsg = null;
 
 // ─── Bar ─────────────────────────────────────────────────────────────────────
 
@@ -54,6 +55,7 @@ function getFaviconLink() {
 }
 
 function applyFaviconOverlay(mode) {
+  const gen = ++_faviconGen;
   faviconLinkEl = faviconLinkEl || getFaviconLink();
 
   // Preserve original href once
@@ -87,6 +89,7 @@ function applyFaviconOverlay(mode) {
     const img = new Image();
     img.crossOrigin = "anonymous";
     img.onload = () => {
+      if (gen !== _faviconGen) return;
       try {
         ctx.drawImage(img, 0, 0, size, size);
         drawOverlay();
@@ -97,6 +100,7 @@ function applyFaviconOverlay(mode) {
       }
     };
     img.onerror = () => {
+      if (gen !== _faviconGen) return;
       drawOverlay();
     };
     img.src = src;
@@ -115,6 +119,7 @@ function setFaviconDataUrl(dataUrl) {
 }
 
 function removeFaviconOverlay() {
+  ++_faviconGen;
   if (!faviconLinkEl || !originalFaviconHref) return;
   faviconLinkEl.href = originalFaviconHref;
   originalFaviconHref = null;
@@ -126,36 +131,31 @@ function applyState(state, tabId) {
   updateBar(state);
 
   const nowBound = state.boundTabId !== null && tabId === state.boundTabId;
-  const modeChanged = state.mode !== lastMode;
-  const bindChanged = nowBound !== lastIsBound;
+  const shouldBind = nowBound && state.mode !== "idle";
 
-  if (nowBound && state.mode !== "idle" && (bindChanged || modeChanged)) {
+  if (shouldBind && (!isBound || state.mode !== lastMode)) {
     applyFaviconOverlay(state.mode);
-    isBound = true;
-  } else if (isBound && (!nowBound || state.mode === "idle")) {
+  } else if (!shouldBind && isBound) {
     removeFaviconOverlay();
-    isBound = false;
   }
-
+  isBound = shouldBind;
   lastMode = state.mode;
-  lastIsBound = nowBound;
 }
 
-// ─── Polling ──────────────────────────────────────────────────────────────────
+// ─── Visibility sync ──────────────────────────────────────────────────────────
 
-function poll() {
+document.addEventListener("visibilitychange", () => {
   if (document.hidden || myTabId === null) return;
   browser.runtime.sendMessage({ type: "GET_STATE" }).then((state) => {
     applyState(state, myTabId);
   }).catch(() => {});
-}
-
-setInterval(poll, 1000);
+});
 
 // ─── Push messages from background ───────────────────────────────────────────
 
 browser.runtime.onMessage.addListener((msg) => {
-  if (msg.type === "UPDATE_BAR" && myTabId !== null) {
+  if (msg.type === "UPDATE_BAR") {
+    if (myTabId === null) { pendingMsg = msg; return; }
     applyState(msg, myTabId);
   }
 });
@@ -165,4 +165,8 @@ browser.runtime.onMessage.addListener((msg) => {
 browser.runtime.sendMessage({ type: "CONTENT_READY" }).then((response) => {
   myTabId = response.tabId;
   applyState(response.state, myTabId);
+  if (pendingMsg) {
+    applyState(pendingMsg, myTabId);
+    pendingMsg = null;
+  }
 }).catch(() => {});

@@ -8,6 +8,17 @@ const DEFAULT_SETTINGS = {
   completionThreshold: 80,
 };
 
+// Change 2 (todo 002): sanitize and clamp all settings fields at boundaries.
+function sanitizeSettings(raw) {
+  return {
+    workDuration:        Math.max(1, Math.min(120, parseInt(raw.workDuration)        || 25)),
+    breakDuration:       Math.max(1, Math.min(60,  parseInt(raw.breakDuration)       || 5)),
+    longBreakDuration:   Math.max(1, Math.min(120, parseInt(raw.longBreakDuration)   || 15)),
+    longBreakInterval:   Math.max(1, Math.min(10,  parseInt(raw.longBreakInterval)   || 4)),
+    completionThreshold: Math.max(1, Math.min(100, parseInt(raw.completionThreshold) || 80)),
+  };
+}
+
 // Runtime state. startTimestamp is the wall-clock time the current running
 // period began; elapsedMs accumulates time across auto-pauses.
 const state = {
@@ -24,6 +35,12 @@ const state = {
 
 let settings = { ...DEFAULT_SETTINGS };
 let tickInterval = null;
+
+// Change 6 (todo 006): timer handle for debouncing activity checks.
+let _activityCheckTimer = null;
+
+// Change 8 (todo 013): gate messages until init() completes.
+let initialized = false;
 
 // ─── Elapsed helpers ─────────────────────────────────────────────────────────
 
@@ -58,14 +75,15 @@ function stopTick() {
 function tick() {
   if (state.autoPaused || state.mode === "idle") return;
 
-  state.elapsedMs = Date.now() - state.startTimestamp;
+  // Change 7 (todo 012): use currentElapsed() for consistency.
+  state.elapsedMs = currentElapsed();
 
   if (state.elapsedMs >= state.sessionDuration) {
     state.elapsedMs = state.sessionDuration;
     onSessionComplete();
   } else {
+    // Change 5 (todo 005): persistState removed from hot tick path.
     broadcastState();
-    persistState();
     updateBadge();
   }
 }
@@ -99,6 +117,10 @@ function startSession(mode) {
   }
 
   startTick();
+  // Change 7 (todo 012): set badge color once at session start, not on every tick.
+  browser.browserAction.setBadgeBackgroundColor({
+    color: mode === "work" ? "#E05A4A" : "#52C78E",
+  });
   broadcastState();
   persistState();
   updateBadge();
@@ -106,7 +128,8 @@ function startSession(mode) {
 
 function stopSession() {
   if (state.mode === "idle") return;
-  maybeLogWork(false);
+  // Change 4 (todo 010): consolidated into recordWorkSession.
+  recordWorkSession(false);
   resetToIdle();
 }
 
@@ -114,17 +137,15 @@ function onSessionComplete() {
   stopTick();
 
   if (state.mode === "work") {
-    logSession(true, 100);
-    state.pomodoroCount++;
+    // Change 4 (todo 010): replace inline logSession + pomodoroCount++ with recordWorkSession.
+    recordWorkSession(true);
   }
 
   const wasWork = state.mode === "work";
   const pomosBeforeReset = state.pomodoroCount;
 
-  // After long break, reset cycle counter
-  if (state.mode === "longBreak") {
-    state.pomodoroCount = 0;
-  }
+  // Change 4 (todo 010): dead block removed — mode is always "work" here,
+  // so the longBreak branch could never execute.
 
   notify(wasWork, pomosBeforeReset);
 
@@ -174,40 +195,45 @@ function unbindTab() {
   broadcastState();
 }
 
-// Auto-pause: fires when tab activation or window focus changes.
+// Change 6 (todo 006): single atomic query replaces the nested
+// tabs.query + windows.getCurrent pair; lastFocusedWindow covers all windows.
 function checkBoundTabActivity() {
   if (state.boundTabId === null || state.mode === "idle") return;
 
-  browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
-    browser.windows.getCurrent().then((win) => {
-      const activeTabId = tabs.length ? tabs[0].id : null;
-      const isActive = win.focused && activeTabId === state.boundTabId;
+  browser.tabs.query({ active: true, lastFocusedWindow: true }).then((tabs) => {
+    const isActive = tabs.length > 0 && tabs[0].id === state.boundTabId;
 
-      if (isActive && state.autoPaused) {
-        // Resume: restart startTimestamp so elapsedMs is continuous
-        state.startTimestamp = Date.now() - state.elapsedMs;
-        state.autoPaused = false;
-        broadcastState();
-        persistState();
-      } else if (!isActive && !state.autoPaused) {
-        // Auto-pause: snapshot elapsed
-        state.elapsedMs = Date.now() - state.startTimestamp;
-        state.autoPaused = true;
-        broadcastState();
-        persistState();
-      }
-    });
+    if (isActive && state.autoPaused) {
+      // Resume: restart startTimestamp so elapsedMs is continuous
+      state.startTimestamp = Date.now() - state.elapsedMs;
+      state.autoPaused = false;
+      broadcastState();
+      persistState();
+    } else if (!isActive && !state.autoPaused) {
+      // Auto-pause: snapshot elapsed
+      state.elapsedMs = Date.now() - state.startTimestamp;
+      state.autoPaused = true;
+      broadcastState();
+      persistState();
+    }
   });
 }
 
-browser.tabs.onActivated.addListener(checkBoundTabActivity);
-browser.windows.onFocusChanged.addListener(checkBoundTabActivity);
+// Change 6 (todo 006): debounce rapid activation/focus events into one check.
+function scheduleActivityCheck() {
+  clearTimeout(_activityCheckTimer);
+  _activityCheckTimer = setTimeout(checkBoundTabActivity, 50);
+}
+
+browser.tabs.onActivated.addListener(scheduleActivityCheck);
+browser.windows.onFocusChanged.addListener(scheduleActivityCheck);
 
 browser.tabs.onRemoved.addListener((tabId) => {
   if (tabId !== state.boundTabId) return;
 
-  // Bound tab closed — count as abandoned work session if ≥ threshold
-  maybeLogWork(false);
+  // Change 4 (todo 010): bound tab closed — use recordWorkSession instead of
+  // inline logic; counts as abandoned if work session met threshold.
+  recordWorkSession(false);
 
   state.boundTabId = null;
   resetToIdle();
@@ -215,25 +241,36 @@ browser.tabs.onRemoved.addListener((tabId) => {
 
 // ─── History ──────────────────────────────────────────────────────────────────
 
-function maybeLogWork(completed) {
+// Change 4 (todo 010): maybeLogWork replaced by recordWorkSession, which also
+// handles the pomodoroCount increment, eliminating duplicate increment paths.
+function recordWorkSession(fullyCompleted) {
   if (state.mode !== "work") return;
-  const pct = progress() * 100;
-  const counted = pct >= settings.completionThreshold;
-  logSession(counted, pct);
+  const pct = fullyCompleted ? 100 : progress() * 100;
+  const counted = fullyCompleted || pct >= settings.completionThreshold;
   if (counted) state.pomodoroCount++;
+  logSession(counted, pct);
 }
 
+// Change 3 (todo 003): snapshot mutable state synchronously before the first
+// await so async storage reads see a consistent picture of the session.
 async function logSession(completed, pctComplete) {
-  if (state.mode === "idle") return;
+  const snapshot = {
+    mode: state.mode,
+    domain: state.sessionDomain,
+    startTime: state.sessionStart,
+    duration: state.sessionDuration,
+    elapsed: Math.round(currentElapsed()),
+  };
+  if (snapshot.mode === "idle") return;
 
   const entry = {
     id: Date.now().toString(36) + Math.random().toString(36).slice(2),
-    type: state.mode,
-    domain: state.sessionDomain,
-    startTime: state.sessionStart,
+    type: snapshot.mode,
+    domain: snapshot.domain,
+    startTime: snapshot.startTime,
     endTime: Date.now(),
-    duration: state.sessionDuration,
-    elapsed: Math.round(currentElapsed()),
+    duration: snapshot.duration,
+    elapsed: snapshot.elapsed,
     completed,
     pctComplete: Math.round(pctComplete),
   };
@@ -280,10 +317,8 @@ function updateBadge() {
   const mins = Math.ceil(remaining() / 60000);
   const label = state.mode === "work" ? String(mins) : state.mode === "longBreak" ? "LB" : "B";
 
+  // Change 7 (todo 012): color is set once in startSession(); only text here.
   browser.browserAction.setBadgeText({ text: label });
-  browser.browserAction.setBadgeBackgroundColor({
-    color: state.mode === "work" ? "#E05A4A" : "#52C78E",
-  });
 }
 
 // ─── Broadcasting ─────────────────────────────────────────────────────────────
@@ -293,7 +328,7 @@ function publicState() {
     mode: state.mode,
     progress: progress(),
     remaining: remaining(),
-    sessionDuration: state.sessionDuration,
+    // Change 5 (todo 005): sessionDuration removed from public surface.
     autoPaused: state.autoPaused,
     pomodoroCount: state.pomodoroCount,
     boundTabId: state.boundTabId,
@@ -301,21 +336,19 @@ function publicState() {
   };
 }
 
+// Change 5 (todo 005): send UPDATE_BAR only to bound tab; avoid broadcasting
+// to every content script on every tick.
 function broadcastState() {
   const ps = publicState();
 
-  // Push to all content scripts
-  browser.tabs.query({}).then((tabs) => {
-    tabs.forEach((tab) => {
-      browser.tabs.sendMessage(tab.id, {
-        type: "UPDATE_BAR",
-        ...ps,
-        isBoundTab: tab.id === state.boundTabId,
-      }).catch(() => {});
-    });
-  });
+  if (state.boundTabId !== null) {
+    browser.tabs.sendMessage(state.boundTabId, {
+      type: "UPDATE_BAR",
+      ...ps,
+      isBoundTab: true,
+    }).catch(() => {});
+  }
 
-  // Push to popup if open
   browser.runtime.sendMessage({ type: "STATE_UPDATE", state: ps }).catch(() => {});
 }
 
@@ -341,7 +374,8 @@ async function init() {
   const stored = await browser.storage.local.get(["settings", "timerState"]);
 
   if (stored.settings) {
-    settings = { ...DEFAULT_SETTINGS, ...stored.settings };
+    // Change 2 (todo 011): sanitizeSettings applied on load, not raw merge.
+    settings = sanitizeSettings({ ...DEFAULT_SETTINGS, ...stored.settings });
   }
 
   if (stored.timerState && stored.timerState.mode !== "idle") {
@@ -365,11 +399,24 @@ async function init() {
     startTick();
     updateBadge();
   }
+
+  // Change 8 (todo 013): signal that init is done; messages arriving before
+  // this point (except CONTENT_READY / GET_STATE) are rejected.
+  initialized = true;
 }
 
 // ─── Message handler ──────────────────────────────────────────────────────────
 
 browser.runtime.onMessage.addListener((msg, sender, reply) => {
+  // Change 1 (todo 001): reject messages from other extensions.
+  if (sender.id && sender.id !== browser.runtime.id) return false;
+
+  // Change 8 (todo 013): reject non-essential messages before init completes.
+  if (!initialized && msg.type !== "CONTENT_READY" && msg.type !== "GET_STATE") {
+    reply({ error: "not ready" });
+    return false;
+  }
+
   switch (msg.type) {
     case "GET_STATE":
       reply(publicState());
@@ -408,15 +455,25 @@ browser.runtime.onMessage.addListener((msg, sender, reply) => {
       browser.storage.local.get("history").then((s) => reply(s.history || []));
       return true; // async
 
-    case "SAVE_SETTINGS":
-      settings = { ...DEFAULT_SETTINGS, ...msg.settings };
+    case "SAVE_SETTINGS": {
+      // Change 2 (todo 011): destructure to accept only known fields, then sanitize.
+      const { workDuration, breakDuration, longBreakDuration,
+              longBreakInterval, completionThreshold } = msg.settings;
+      settings = sanitizeSettings({ workDuration, breakDuration,
+                                    longBreakDuration, longBreakInterval, completionThreshold });
       browser.storage.local.set({ settings });
       reply({ ok: true });
       return false;
+    }
 
     case "CLEAR_HISTORY":
       browser.storage.local.set({ history: [] });
       reply({ ok: true });
+      return false;
+
+    default:
+      // Change 8 (todo 013): surface unknown message types instead of silently ignoring.
+      reply({ error: "unknown message type", type: msg.type });
       return false;
   }
 });
